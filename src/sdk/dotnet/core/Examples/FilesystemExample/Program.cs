@@ -3,16 +3,14 @@
 // Mirrors: src/wasm_sandbox/examples/python_filesystem_demo.rs
 
 using HyperlightSandbox.Api;
-using HyperlightSandbox.Examples.Common;
-
-var guestPath = ExampleHelper.RequirePythonGuest();
+using HyperlightSandbox.Guest.Python;
 
 Console.WriteLine("=== Hyperlight Sandbox .NET — Filesystem Example ===\n");
 
 // --- Test 1: Temp output ---
 Console.WriteLine("═══ Test 1: Temp output directory ═══");
 using (var sandbox = new SandboxBuilder()
-    .WithModulePath(guestPath)
+    .WithPythonModule()
     .WithTempOutput()
     .Build())
 {
@@ -38,7 +36,7 @@ File.WriteAllText(Path.Combine(inputDir, "data.txt"), "Input data from host");
 try
 {
     using var sandbox = new SandboxBuilder()
-        .WithModulePath(guestPath)
+        .WithPythonModule()
         .WithInputDir(inputDir)
         .WithTempOutput()
         .Build();

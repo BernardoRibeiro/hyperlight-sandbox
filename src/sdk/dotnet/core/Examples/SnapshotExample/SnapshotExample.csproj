@@ -7,6 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\Api\HyperlightSandbox.Api.csproj" />
-    <ProjectReference Include="..\Common\Common.csproj" />
+    <ProjectReference Include="..\..\Guest.Python\HyperlightSandbox.Guest.Python.csproj" />
   </ItemGroup>
 </Project>

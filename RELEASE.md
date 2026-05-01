@@ -24,6 +24,10 @@ All other workspace member crates inherit the version automatically.
 
 - `src/wasm_sandbox/guests/javascript/package.json`
 
+### .NET (Directory.Build.props)
+
+- `src/sdk/dotnet/Directory.Build.props`
+
 ## 2. Verify the Build
 
 ```sh

@@ -6,14 +6,12 @@
 
 using System.Diagnostics;
 using HyperlightSandbox.Api;
-using HyperlightSandbox.Examples.Common;
-
-var guestPath = ExampleHelper.RequirePythonGuest();
+using HyperlightSandbox.Guest.Python;
 
 Console.WriteLine("=== Hyperlight Sandbox .NET — Snapshot Example ===\n");
 
 using var sandbox = new SandboxBuilder()
-    .WithModulePath(guestPath)
+    .WithPythonModule()
     .WithTempOutput()
     .Build();
 
