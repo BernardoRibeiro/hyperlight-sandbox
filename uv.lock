@@ -18,7 +18,7 @@ members = [
 
 [[package]]
 name = "agent-framework-core"
-version = "1.2.0"
+version = "1.2.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "opentelemetry-api" },
@@ -26,14 +26,14 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/58/57/d83aff2a267ba7d0f48065eb6b15f73346fa0f96c766e31646625b678347/agent_framework_core-1.2.0.tar.gz", hash = "sha256:c5ddcef69246baca90a517bb1d440a0f36bbc4fb9894bb2b05b8b43162597c0c", size = 306773, upload-time = "2026-04-24T10:56:59.545Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/99/6a/dae422906f3a664a54c079238ba97a7d1be6958782e341381ea0db228007/agent_framework_core-1.2.2.tar.gz", hash = "sha256:486ddecbdc0c47acf890b2230e5986beb1c5dc8cca39d8faeb008013ba7aa0e5", size = 309480, upload-time = "2026-04-29T08:55:57.206Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1f/1f/0c7fcb2ed4432be3c1386b83f4d6e16797c09e5cb4e68aad008d8eca127f/agent_framework_core-1.2.0-py3-none-any.whl", hash = "sha256:e22d824d57ecd7d5a4ca33bc4f86d523c7558453a17b94f48c14c6a67b5c48ff", size = 345536, upload-time = "2026-04-24T10:57:16.643Z" },
+    { url = "https://files.pythonhosted.org/packages/68/1d/2aeada01b7c0e72fd363332c8f283eea229f3b044b816c8c0ae3cb8cf517/agent_framework_core-1.2.2-py3-none-any.whl", hash = "sha256:67c1eb8a22cb1d710c478cf2f4dd278ee9dae3ea5643a4d6e63256fdf3a121ee", size = 348302, upload-time = "2026-04-29T08:55:55.895Z" },
 ]
 
 [[package]]
 name = "agent-framework-devui"
-version = "1.0.0b260424"
+version = "1.0.0b260429"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-framework-core" },
@@ -42,22 +42,22 @@ dependencies = [
     { name = "opentelemetry-sdk" },
     { name = "uvicorn", extra = ["standard"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/02/59/75f80397541a52340e65b99e4818f007d213b965397ec7b6f798ff47fbdf/agent_framework_devui-1.0.0b260424.tar.gz", hash = "sha256:4aeb4f8b40a41851b0541bdeed09c05f130a939aabcaf8a215a544041b4edf3d", size = 357821, upload-time = "2026-04-24T10:57:44.885Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9f/73/7e697b47ad304dd1db9e90483521b4c7ed4085bb24688016661418403a7b/agent_framework_devui-1.0.0b260429.tar.gz", hash = "sha256:b150f3c51e1a6556a5407aa63ba1c3f83c896edd4dc6bcdff9f24a9d80732cbd", size = 357824, upload-time = "2026-04-29T08:55:00.343Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/52/63/d411bfcf4445c2e41f043d98ff10a2bf5b9c7f4fa3c44165cc2b4e3f3535/agent_framework_devui-1.0.0b260424-py3-none-any.whl", hash = "sha256:1d69e7b1fbf4e6c9b797bb59c2d2fa0a24be95743eed5cdb3580835c9e6929e8", size = 362918, upload-time = "2026-04-24T10:57:15.186Z" },
+    { url = "https://files.pythonhosted.org/packages/9b/70/677d450f621e3587487ce7156ddb9602b0a2310bbb52f3eac6477187d220/agent_framework_devui-1.0.0b260429-py3-none-any.whl", hash = "sha256:81e9bda8a1049b28eb3a551e92c17974bbec4f5afe4d9c8475ea83b84361ab8e", size = 362922, upload-time = "2026-04-29T08:55:49.535Z" },
 ]
 
 [[package]]
 name = "agent-framework-github-copilot"
-version = "1.0.0b260424"
+version = "1.0.0b260429"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-framework-core" },
     { name = "github-copilot-sdk", version = "0.2.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0e/80/9e2853d3181bae4a543cc0cfebee660c094c4364ea7f6854cdae88577dd1/agent_framework_github_copilot-1.0.0b260424.tar.gz", hash = "sha256:7abc0f078cb1cf60e20e586922a6226bec2320e92d9d39db85eb6418e1ec3a4b", size = 10965, upload-time = "2026-04-24T10:57:46.338Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/da/5c/c57bdb25ea5bc0daeba65e539234b0815d37fb675a95fe31fb1b0654555d/agent_framework_github_copilot-1.0.0b260429.tar.gz", hash = "sha256:5ad90084021c11a922781ea2c9bc65a67f5a9e8628998e47cf46e1a23dc7a913", size = 10965, upload-time = "2026-04-29T08:55:05.735Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/72/3a/7bd4e1659cf9fa8ef62968b8e8c1a910d2f581fab968dc6bb19bb0891ec1/agent_framework_github_copilot-1.0.0b260424-py3-none-any.whl", hash = "sha256:dc8c3812f9da2ae316eb9e4cb0dcf21daca1802bcc7d1e7036de9e7a5599fc68", size = 10929, upload-time = "2026-04-24T10:56:54.303Z" },
+    { url = "https://files.pythonhosted.org/packages/3f/14/5be226bdccc12fae49aa9a7579c1e540177be686cbd72ba86cd6d5cc7a04/agent_framework_github_copilot-1.0.0b260429-py3-none-any.whl", hash = "sha256:444871648b786e450806e622cc53a4c6df7da4ff73294ba58b321514e056a00d", size = 10929, upload-time = "2026-04-29T08:55:17.76Z" },
 ]
 
 [[package]]
@@ -529,7 +529,7 @@ wheels = [
 
 [[package]]
 name = "hyperlight-sandbox"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "src/sdk/python/core" }
 
 [package.optional-dependencies]
@@ -561,17 +561,17 @@ provides-extras = ["wasm", "hyperlight-js", "python-guest", "javascript-guest", 
 
 [[package]]
 name = "hyperlight-sandbox-backend-hyperlight-js"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "src/sdk/python/hyperlight_js_backend" }
 
 [[package]]
 name = "hyperlight-sandbox-backend-wasm"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "src/sdk/python/wasm_backend" }
 
 [[package]]
 name = "hyperlight-sandbox-dev"
-version = "0.3.0"
+version = "0.4.0"
 source = { virtual = "." }
 
 [package.dev-dependencies]
@@ -608,13 +608,13 @@ dev = [
 
 [package.metadata.requires-dev]
 agent-framework = [
-    { name = "agent-framework-github-copilot", specifier = ">=1.0.0b260423" },
+    { name = "agent-framework-github-copilot", specifier = ">=1.0.0b260429" },
     { name = "hyperlight-sandbox", editable = "src/sdk/python/core" },
     { name = "hyperlight-sandbox-backend-wasm", editable = "src/sdk/python/wasm_backend" },
     { name = "hyperlight-sandbox-python-guest", editable = "src/sdk/python/wasm_guests/python_guest" },
     { name = "pydantic" },
 ]
-agent-framework-devui = [{ name = "agent-framework-devui", specifier = ">=1.0.0b260421" }]
+agent-framework-devui = [{ name = "agent-framework-devui", specifier = ">=1.0.0b260428" }]
 copilot-sdk = [
     { name = "github-copilot-sdk" },
     { name = "hyperlight-sandbox", editable = "src/sdk/python/core" },
@@ -635,12 +635,12 @@ dev = [
 
 [[package]]
 name = "hyperlight-sandbox-javascript-guest"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "src/sdk/python/wasm_guests/javascript_guest" }
 
 [[package]]
 name = "hyperlight-sandbox-python-guest"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "src/sdk/python/wasm_guests/python_guest" }
 
 [[package]]
