@@ -4,14 +4,12 @@
 
 using System.Text.Json.Serialization;
 using HyperlightSandbox.Api;
-using HyperlightSandbox.Examples.Common;
-
-var guestPath = ExampleHelper.RequirePythonGuest();
+using HyperlightSandbox.Guest.Python;
 
 Console.WriteLine("=== Hyperlight Sandbox .NET — Tool Registration Example ===\n");
 
 using var sandbox = new SandboxBuilder()
-    .WithModulePath(guestPath)
+    .WithPythonModule()
     .Build();
 
 // --- Register typed tools ---

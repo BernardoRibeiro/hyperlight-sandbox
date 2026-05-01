@@ -29,6 +29,11 @@ build-rust target=default-target:
 build-dotnet target=default-target:
     dotnet build {{repo-root}}/src/sdk/dotnet/core/HyperlightSandbox.sln --configuration {{ if target == "release" { "Release" } else { "Debug" } }}
 
+# Build guest modules that are embedded into guest NuGet packages
+build-guests target=default-target:
+    cd {{repo-root}} && just -f src/wasm_sandbox/Justfile guest-build {{target}}
+    cd {{repo-root}} && just -f src/wasm_sandbox/Justfile js-guest-build
+
 #### FORMAT ####
 
 # Apply all formatting (Rust + .NET)
@@ -82,8 +87,8 @@ test-dotnet target=default-target: (build target)
 
 #### EXAMPLES ####
 
-# Run the core examples (requires guest module: just wasm guest-build)
-examples:
+# Run the core examples
+examples target=default-target: (build-guests target)
     dotnet run --project {{repo-root}}/src/sdk/dotnet/core/Examples/BasicExample/BasicExample.csproj
     dotnet run --project {{repo-root}}/src/sdk/dotnet/core/Examples/ToolRegistrationExample/ToolRegistrationExample.csproj
     dotnet run --project {{repo-root}}/src/sdk/dotnet/core/Examples/SnapshotExample/SnapshotExample.csproj
@@ -99,11 +104,13 @@ copilot-sdk-example:
 #### DIST / PUBLISH ####
 
 # Build NuGet packages
-dist target="release": (build target)
+dist target="release": (build-guests target) (build target)
     {{mkdirp}} {{repo-root}}/dist/dotnetsdk
     dotnet pack {{repo-root}}/src/sdk/dotnet/core/PInvoke/HyperlightSandbox.PInvoke.csproj --configuration {{ if target == "release" { "Release" } else { "Debug" } }} --no-build --output {{repo-root}}/dist/dotnetsdk
     dotnet pack {{repo-root}}/src/sdk/dotnet/core/Api/HyperlightSandbox.Api.csproj --configuration {{ if target == "release" { "Release" } else { "Debug" } }} --no-build --output {{repo-root}}/dist/dotnetsdk
     dotnet pack {{repo-root}}/src/sdk/dotnet/core/Extensions.AI/HyperlightSandbox.Extensions.AI.csproj --configuration {{ if target == "release" { "Release" } else { "Debug" } }} --no-build --output {{repo-root}}/dist/dotnetsdk
+    dotnet pack {{repo-root}}/src/sdk/dotnet/core/Guest.Python/HyperlightSandbox.Guest.Python.csproj --configuration {{ if target == "release" { "Release" } else { "Debug" } }} --no-build --output {{repo-root}}/dist/dotnetsdk
+    dotnet pack {{repo-root}}/src/sdk/dotnet/core/Guest.JavaScript/HyperlightSandbox.Guest.JavaScript.csproj --configuration {{ if target == "release" { "Release" } else { "Debug" } }} --no-build --output {{repo-root}}/dist/dotnetsdk
     @echo "✅ NuGet packages created in dist/dotnetsdk/"
 
 # Publish NuGet packages to nuget.org (requires NUGET_API_KEY env var)
@@ -157,4 +164,8 @@ clean:
     -{{rmrf}} {{repo-root}}/src/sdk/dotnet/core/Api/obj
     -{{rmrf}} {{repo-root}}/src/sdk/dotnet/core/Extensions.AI/bin
     -{{rmrf}} {{repo-root}}/src/sdk/dotnet/core/Extensions.AI/obj
+    -{{rmrf}} {{repo-root}}/src/sdk/dotnet/core/Guest.Python/bin
+    -{{rmrf}} {{repo-root}}/src/sdk/dotnet/core/Guest.Python/obj
+    -{{rmrf}} {{repo-root}}/src/sdk/dotnet/core/Guest.JavaScript/bin
+    -{{rmrf}} {{repo-root}}/src/sdk/dotnet/core/Guest.JavaScript/obj
     -{{rmrf}} {{repo-root}}/dist/dotnetsdk

@@ -3,16 +3,14 @@
 // Mirrors: src/wasm_sandbox/examples/python_network_demo.rs
 
 using HyperlightSandbox.Api;
-using HyperlightSandbox.Examples.Common;
-
-var guestPath = ExampleHelper.RequirePythonGuest();
+using HyperlightSandbox.Guest.Python;
 
 Console.WriteLine("=== Hyperlight Sandbox .NET — Network Example ===\n");
 
 // --- Test 1: Allow a domain with all methods ---
 Console.WriteLine("═══ Test 1: HTTP GET with allowlisted domain ═══");
 using (var sandbox = new SandboxBuilder()
-    .WithModulePath(guestPath)
+    .WithPythonModule()
     .Build())
 {
     sandbox.AllowDomain("https://httpbin.org");
@@ -30,7 +28,7 @@ using (var sandbox = new SandboxBuilder()
 // --- Test 2: Method-filtered access ---
 Console.WriteLine("\n═══ Test 2: Method-filtered access (GET only) ═══");
 using (var sandbox = new SandboxBuilder()
-    .WithModulePath(guestPath)
+    .WithPythonModule()
     .Build())
 {
     // Only allow GET requests to httpbin.org.

@@ -1,0 +1,60 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AnalysisMode>All</AnalysisMode>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <RootNamespace>HyperlightSandbox.Guest.JavaScript</RootNamespace>
+
+    <!-- NuGet Package Metadata -->
+    <PackageId>Hyperlight.HyperlightSandbox.Guest.JavaScript</PackageId>
+    <Description>JavaScript guest module package for hyperlight-sandbox. Bundles the prebuilt JavaScript AOT guest and provides SandboxBuilder.WithJavaScriptModule().</Description>
+    <PackageTags>hyperlight;sandbox;javascript;guest;module</PackageTags>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/hyperlight-dev/hyperlight-sandbox</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/hyperlight-dev/hyperlight-sandbox</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <WorkspaceRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../../../..'))</WorkspaceRoot>
+    <JavaScriptGuestDir>$(WorkspaceRoot)\src\wasm_sandbox\guests\javascript</JavaScriptGuestDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Api\HyperlightSandbox.Api.csproj" />
+  </ItemGroup>
+
+  <!--
+    Native assets following the NuGet runtimes/{rid}/native/ convention (same as PInvoke).
+    The .aot file is Hyperlight/Cranelift AOT output: architecture-specific but NOT OS-specific,
+    so the same binary serves both linux-x64 and win-x64. Include it under both RID folders so
+    NuGet selects the right entry for each consumer platform from a single package build.
+  -->
+  <ItemGroup>
+    <None Include="$(JavaScriptGuestDir)\js-sandbox.aot"
+          Condition="Exists('$(JavaScriptGuestDir)\js-sandbox.aot')">
+      <Pack>true</Pack>
+      <PackagePath>runtimes/linux-x64/native/</PackagePath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>runtimes/linux-x64/native/js-sandbox.aot</Link>
+    </None>
+    <None Include="$(JavaScriptGuestDir)\js-sandbox.aot"
+          Condition="Exists('$(JavaScriptGuestDir)\js-sandbox.aot')">
+      <Pack>true</Pack>
+      <PackagePath>runtimes/win-x64/native/</PackagePath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>runtimes/win-x64/native/js-sandbox.aot</Link>
+    </None>
+  </ItemGroup>
+
+  <Target Name="ValidateJavaScriptGuestResources" BeforeTargets="Pack">
+    <Error Condition="!Exists('$(JavaScriptGuestDir)\js-sandbox.aot')"
+           Text="JavaScript guest AOT binary is missing. Run 'just wasm js-guest-build' before packing Hyperlight.HyperlightSandbox.Guest.JavaScript." />
+  </Target>
+
+</Project>

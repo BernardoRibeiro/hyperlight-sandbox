@@ -27,6 +27,8 @@
   <!-- Reference HyperlightSandbox packages from local NuGet feed (dist/dotnetsdk/) -->
   <ItemGroup>
     <PackageReference Include="Hyperlight.HyperlightSandbox.Api" Version="*" />
+    <PackageReference Include="Hyperlight.HyperlightSandbox.Guest.JavaScript" Version="*" />
+    <PackageReference Include="Hyperlight.HyperlightSandbox.Guest.Python" Version="*" />
   </ItemGroup>
 
 </Project>

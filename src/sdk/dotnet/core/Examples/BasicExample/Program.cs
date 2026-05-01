@@ -3,19 +3,15 @@
 // Mirrors: src/wasm_sandbox/examples/python_basics.rs
 //
 // Prerequisites:
-//   just wasm guest-build    # builds python-sandbox.aot
-//   just dotnet build        # builds the .NET SDK + FFI
+//   just dotnet build        # builds the .NET SDK + bundled guest package
 
 using HyperlightSandbox.Api;
-using HyperlightSandbox.Examples.Common;
-
-var guestPath = ExampleHelper.RequirePythonGuest();
+using HyperlightSandbox.Guest.Python;
 
 Console.WriteLine("=== Hyperlight Sandbox .NET — Basic Example ===\n");
-Console.WriteLine($"Guest module: {guestPath}\n");
 
 using var sandbox = new SandboxBuilder()
-    .WithModulePath(guestPath)
+    .WithPythonModule()
     .Build();
 
 // --- Test 1: Basic code execution ---

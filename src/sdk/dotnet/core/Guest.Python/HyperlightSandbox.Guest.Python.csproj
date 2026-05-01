@@ -1,0 +1,60 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AnalysisMode>All</AnalysisMode>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <RootNamespace>HyperlightSandbox.Guest.Python</RootNamespace>
+
+    <!-- NuGet Package Metadata -->
+    <PackageId>Hyperlight.HyperlightSandbox.Guest.Python</PackageId>
+    <Description>Python guest module package for hyperlight-sandbox. Bundles the prebuilt Python AOT guest and provides SandboxBuilder.WithPythonModule().</Description>
+    <PackageTags>hyperlight;sandbox;python;guest;module</PackageTags>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/hyperlight-dev/hyperlight-sandbox</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/hyperlight-dev/hyperlight-sandbox</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <WorkspaceRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../../../..'))</WorkspaceRoot>
+    <PythonGuestDir>$(WorkspaceRoot)\src\wasm_sandbox\guests\python</PythonGuestDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Api\HyperlightSandbox.Api.csproj" />
+  </ItemGroup>
+
+  <!--
+    Native assets following the NuGet runtimes/{rid}/native/ convention (same as PInvoke).
+    The .aot file is Hyperlight/Cranelift AOT output: architecture-specific but NOT OS-specific,
+    so the same binary serves both linux-x64 and win-x64. Include it under both RID folders so
+    NuGet selects the right entry for each consumer platform from a single package build.
+  -->
+  <ItemGroup>
+    <None Include="$(PythonGuestDir)\python-sandbox.aot"
+          Condition="Exists('$(PythonGuestDir)\python-sandbox.aot')">
+      <Pack>true</Pack>
+      <PackagePath>runtimes/linux-x64/native/</PackagePath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>runtimes/linux-x64/native/python-sandbox.aot</Link>
+    </None>
+    <None Include="$(PythonGuestDir)\python-sandbox.aot"
+          Condition="Exists('$(PythonGuestDir)\python-sandbox.aot')">
+      <Pack>true</Pack>
+      <PackagePath>runtimes/win-x64/native/</PackagePath>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>runtimes/win-x64/native/python-sandbox.aot</Link>
+    </None>
+  </ItemGroup>
+
+  <Target Name="ValidatePythonGuestResources" BeforeTargets="Pack">
+    <Error Condition="!Exists('$(PythonGuestDir)\python-sandbox.aot')"
+           Text="Python guest AOT binary is missing. Run 'just wasm guest-build' before packing Hyperlight.HyperlightSandbox.Guest.Python." />
+  </Target>
+
+</Project>

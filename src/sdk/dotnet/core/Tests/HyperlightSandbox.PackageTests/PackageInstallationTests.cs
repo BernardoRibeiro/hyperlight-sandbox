@@ -1,4 +1,6 @@
 using HyperlightSandbox.Api;
+using HyperlightSandbox.Guest.JavaScript;
+using HyperlightSandbox.Guest.Python;
 using Xunit;
 
 namespace HyperlightSandbox.PackageTests;
@@ -77,6 +79,36 @@ public class PackageInstallationTests
         // so no module load until Run is called).
         using var sandbox = new SandboxBuilder()
             .WithModulePath("/tmp/package-test-nonexistent.wasm")
+            .Build();
+
+        Assert.NotNull(sandbox);
+    }
+
+    [Fact]
+    public void GuestPython_PackageMaterializesModuleAndConfiguresBuilder()
+    {
+        var modulePath = PythonGuestModule.GetModulePath();
+
+        Assert.True(File.Exists(modulePath));
+        Assert.EndsWith(PythonGuestModule.ModuleFileName, modulePath, StringComparison.Ordinal);
+
+        using var sandbox = new SandboxBuilder()
+            .WithPythonModule()
+            .Build();
+
+        Assert.NotNull(sandbox);
+    }
+
+    [Fact]
+    public void GuestJavaScript_PackageMaterializesModuleAndConfiguresBuilder()
+    {
+        var modulePath = JavaScriptGuestModule.GetModulePath();
+
+        Assert.True(File.Exists(modulePath));
+        Assert.EndsWith(JavaScriptGuestModule.ModuleFileName, modulePath, StringComparison.Ordinal);
+
+        using var sandbox = new SandboxBuilder()
+            .WithJavaScriptModule()
             .Build();
 
         Assert.NotNull(sandbox);

@@ -18,7 +18,6 @@ A .NET 8.0 SDK for running code in secure, sandboxed environments using [hyperli
 
 ```bash
 # Prerequisites
-just wasm guest-build          # Build the Python guest module
 just dotnet build              # Build the .NET SDK + Rust FFI
 ```
 
@@ -26,10 +25,11 @@ just dotnet build              # Build the .NET SDK + Rust FFI
 
 ```csharp
 using HyperlightSandbox.Api;
+using HyperlightSandbox.Guest.Python;
 
 // Create a sandbox with the Python guest
 using var sandbox = new SandboxBuilder()
-    .WithModulePath("path/to/python-sandbox.aot")
+    .WithPythonModule()
     .Build();
 
 // Execute code
@@ -50,7 +50,7 @@ Register .NET functions that guest code can call:
 
 ```csharp
 using var sandbox = new SandboxBuilder()
-    .WithModulePath("python-sandbox.aot")
+    .WithPythonModule()
     .Build();
 
 // Typed tool — auto-serializes args and result
@@ -87,13 +87,24 @@ using var sandbox = new SandboxBuilder()
 var result = sandbox.Run("console.log('Hello from JS!');");
 ```
 
+To run JavaScript through the Wasm guest module package instead, reference
+`Hyperlight.HyperlightSandbox.Guest.JavaScript` and call:
+
+```csharp
+using HyperlightSandbox.Guest.JavaScript;
+
+using var sandbox = new SandboxBuilder()
+    .WithJavaScriptModule()
+    .Build();
+```
+
 ### Snapshot/Restore
 
 Checkpoint sandbox state for fast resets between executions:
 
 ```csharp
 using var sandbox = new SandboxBuilder()
-    .WithModulePath("python-sandbox.aot")
+    .WithPythonModule()
     .Build();
 
 // Cold start (~2.5s)
@@ -114,7 +125,7 @@ sandbox.Run("print(x)");  // NameError: x is not defined
 
 ```csharp
 using var sandbox = new SandboxBuilder()
-    .WithModulePath("python-sandbox.aot")
+    .WithPythonModule()
     .WithInputDir("/path/to/input")    // Read-only /input in guest
     .WithTempOutput()                   // Writable /output in guest
     .Build();
@@ -149,11 +160,12 @@ Use with GitHub Copilot SDK or Microsoft Agent Framework:
 ```csharp
 using HyperlightSandbox.Api;
 using HyperlightSandbox.Extensions.AI;
+using HyperlightSandbox.Guest.Python;
 
 // Create a code execution tool with snapshot/restore for clean state
 using var codeTool = new CodeExecutionTool(
     new SandboxBuilder()
-        .WithModulePath("python-sandbox.aot")
+        .WithPythonModule()
         .WithTempOutput());
 
 codeTool.RegisterTool<MathArgs, double>("compute",
@@ -229,6 +241,8 @@ just dotnet copilot-sdk-example       # Run Copilot SDK example
 | `Hyperlight.HyperlightSandbox.PInvoke` | P/Invoke bindings + native library |
 | `Hyperlight.HyperlightSandbox.Api` | High-level API (Sandbox, tools, snapshots) |
 | `Hyperlight.HyperlightSandbox.Extensions.AI` | AI agent integration (CodeExecutionTool, AIFunction) |
+| `Hyperlight.HyperlightSandbox.Guest.Python` | Bundled Python Wasm/AOT guest module + `WithPythonModule()` |
+| `Hyperlight.HyperlightSandbox.Guest.JavaScript` | Bundled JavaScript Wasm/AOT guest module + `WithJavaScriptModule()` |
 
 ## API Reference
 
@@ -237,6 +251,8 @@ just dotnet copilot-sdk-example       # Run Copilot SDK example
 | Method | Description |
 |--------|-------------|
 | `WithModulePath(string)` | Path to `.wasm`/`.aot` guest (required for Wasm) |
+| `WithPythonModule()` | Use the bundled Python guest from `Hyperlight.HyperlightSandbox.Guest.Python` |
+| `WithJavaScriptModule()` | Use the bundled JavaScript Wasm guest from `Hyperlight.HyperlightSandbox.Guest.JavaScript` |
 | `WithBackend(SandboxBackend)` | `Wasm` (default) or `JavaScript` |
 | `WithHeapSize(string\|ulong)` | Guest heap size (e.g. `"50Mi"`, default: platform-dependent) |
 | `WithStackSize(string\|ulong)` | Guest stack size (e.g. `"35Mi"`, default: platform-dependent) |
@@ -299,7 +315,7 @@ sandbox.Run("...");
 - .NET 8.0 SDK or later
 - Rust 1.89+ (for building the FFI crate)
 - Linux (Windows support coming via hyperlight)
-- `just wasm guest-build` for Wasm backend examples
+- `just dotnet dist` builds the Python and JavaScript guest modules before packing their NuGet packages
 
 ## Contributing
 
