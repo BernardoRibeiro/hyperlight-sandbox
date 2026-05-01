@@ -19,7 +19,7 @@ devnull := if os() == "windows" { "$null" } else { "/dev/null" }
 #### BUILD ####
 
 # Build everything (Rust FFI + .NET solution)
-build target=default-target: (build-rust target) (build-dotnet target)
+build target=default-target: (build-rust target) (build-dotnet target) (build-guests target)
 
 # Build only the Rust FFI crate
 build-rust target=default-target:

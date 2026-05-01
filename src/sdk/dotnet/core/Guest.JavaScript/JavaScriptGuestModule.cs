@@ -1,4 +1,3 @@
-using System.Reflection;
 using HyperlightSandbox.Api;
 
 namespace HyperlightSandbox.Guest.JavaScript;
@@ -34,7 +33,7 @@ public static class JavaScriptGuestModule
     private static string FindGuestFile(string fileName)
     {
         string assemblyDir = Path.GetDirectoryName(
-            typeof(JavaScriptGuestModule).Assembly.Location) ?? string.Empty;
+            typeof(JavaScriptGuestModule).Assembly.Location) ?? AppContext.BaseDirectory;
 
         // The .aot binary is built on Windows but works on both linux-x64 and win-x64.
         // Probe the OS-appropriate RID path first (matches SafeNativeMethods.DllImportResolver).

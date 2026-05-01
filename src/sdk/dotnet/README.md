@@ -252,7 +252,7 @@ just dotnet copilot-sdk-example       # Run Copilot SDK example
 |--------|-------------|
 | `WithModulePath(string)` | Path to `.wasm`/`.aot` guest (required for Wasm) |
 | `WithPythonModule()` | Use the bundled Python guest from `Hyperlight.HyperlightSandbox.Guest.Python` |
-| `WithJavaScriptModule()` | Use the bundled JavaScript Wasm guest from `Hyperlight.HyperlightSandbox.Guest.JavaScript` |
+| `WithJavaScriptModule()` | Use the bundled JavaScript guest from `Hyperlight.HyperlightSandbox.Guest.JavaScript` |
 | `WithBackend(SandboxBackend)` | `Wasm` (default) or `JavaScript` |
 | `WithHeapSize(string\|ulong)` | Guest heap size (e.g. `"50Mi"`, default: platform-dependent) |
 | `WithStackSize(string\|ulong)` | Guest stack size (e.g. `"35Mi"`, default: platform-dependent) |

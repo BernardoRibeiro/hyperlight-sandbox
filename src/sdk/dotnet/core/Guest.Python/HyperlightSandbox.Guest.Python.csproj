@@ -22,7 +22,7 @@
 
   <PropertyGroup>
     <WorkspaceRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../../../..'))</WorkspaceRoot>
-    <PythonGuestDir>$(WorkspaceRoot)\src\wasm_sandbox\guests\python</PythonGuestDir>
+    <PythonGuestDir>$([System.IO.Path]::Combine('$(WorkspaceRoot)', 'src', 'wasm_sandbox', 'guests', 'python'))</PythonGuestDir>
   </PropertyGroup>
 
   <ItemGroup>
@@ -36,15 +36,15 @@
     NuGet selects the right entry for each consumer platform from a single package build.
   -->
   <ItemGroup>
-    <None Include="$(PythonGuestDir)\python-sandbox.aot"
-          Condition="Exists('$(PythonGuestDir)\python-sandbox.aot')">
+    <None Include="$(PythonGuestDir)/python-sandbox.aot"
+          Condition="Exists('$(PythonGuestDir)/python-sandbox.aot')">
       <Pack>true</Pack>
       <PackagePath>runtimes/linux-x64/native/</PackagePath>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>runtimes/linux-x64/native/python-sandbox.aot</Link>
     </None>
-    <None Include="$(PythonGuestDir)\python-sandbox.aot"
-          Condition="Exists('$(PythonGuestDir)\python-sandbox.aot')">
+    <None Include="$(PythonGuestDir)/python-sandbox.aot"
+          Condition="Exists('$(PythonGuestDir)/python-sandbox.aot')">
       <Pack>true</Pack>
       <PackagePath>runtimes/win-x64/native/</PackagePath>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -53,7 +53,7 @@
   </ItemGroup>
 
   <Target Name="ValidatePythonGuestResources" BeforeTargets="Pack">
-    <Error Condition="!Exists('$(PythonGuestDir)\python-sandbox.aot')"
+    <Error Condition="!Exists('$(PythonGuestDir)/python-sandbox.aot')"
            Text="Python guest AOT binary is missing. Run 'just wasm guest-build' before packing Hyperlight.HyperlightSandbox.Guest.Python." />
   </Target>
 

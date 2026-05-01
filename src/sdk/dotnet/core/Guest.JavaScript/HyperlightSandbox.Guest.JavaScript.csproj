@@ -22,7 +22,7 @@
 
   <PropertyGroup>
     <WorkspaceRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)../../../../..'))</WorkspaceRoot>
-    <JavaScriptGuestDir>$(WorkspaceRoot)\src\wasm_sandbox\guests\javascript</JavaScriptGuestDir>
+    <JavaScriptGuestDir>$([System.IO.Path]::Combine('$(WorkspaceRoot)', 'src', 'wasm_sandbox', 'guests', 'javascript'))</JavaScriptGuestDir>
   </PropertyGroup>
 
   <ItemGroup>
@@ -36,15 +36,15 @@
     NuGet selects the right entry for each consumer platform from a single package build.
   -->
   <ItemGroup>
-    <None Include="$(JavaScriptGuestDir)\js-sandbox.aot"
-          Condition="Exists('$(JavaScriptGuestDir)\js-sandbox.aot')">
+    <None Include="$(JavaScriptGuestDir)/js-sandbox.aot"
+          Condition="Exists('$(JavaScriptGuestDir)/js-sandbox.aot')">
       <Pack>true</Pack>
       <PackagePath>runtimes/linux-x64/native/</PackagePath>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>runtimes/linux-x64/native/js-sandbox.aot</Link>
     </None>
-    <None Include="$(JavaScriptGuestDir)\js-sandbox.aot"
-          Condition="Exists('$(JavaScriptGuestDir)\js-sandbox.aot')">
+    <None Include="$(JavaScriptGuestDir)/js-sandbox.aot"
+          Condition="Exists('$(JavaScriptGuestDir)/js-sandbox.aot')">
       <Pack>true</Pack>
       <PackagePath>runtimes/win-x64/native/</PackagePath>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -53,7 +53,7 @@
   </ItemGroup>
 
   <Target Name="ValidateJavaScriptGuestResources" BeforeTargets="Pack">
-    <Error Condition="!Exists('$(JavaScriptGuestDir)\js-sandbox.aot')"
+    <Error Condition="!Exists('$(JavaScriptGuestDir)/js-sandbox.aot')"
            Text="JavaScript guest AOT binary is missing. Run 'just wasm js-guest-build' before packing Hyperlight.HyperlightSandbox.Guest.JavaScript." />
   </Target>
 
