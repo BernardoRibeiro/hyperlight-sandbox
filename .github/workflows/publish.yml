@@ -4,6 +4,17 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      publish_target:
+        description: "What to run"
+        required: true
+        type: choice
+        options:
+          - all
+          - python
+          - dotnet
+        default: all
 
 permissions:
   contents: read
@@ -11,7 +22,7 @@ permissions:
 jobs:
   # Build all Python packages on Linux (pure + backend wheels).
   build-linux:
-    if: ${{ !github.event.act }}
+    if: ${{ !github.event.act && (github.event_name != 'workflow_dispatch' || inputs.publish_target == 'all' || inputs.publish_target == 'python') }}
     name: Build Linux packages
     runs-on: ubuntu-latest
     steps:
@@ -51,7 +62,7 @@ jobs:
 
   # Build Windows-specific maturin backend wheels only.
   build-windows:
-    if: ${{ !github.event.act }}
+    if: ${{ !github.event.act && (github.event_name != 'workflow_dispatch' || inputs.publish_target == 'all' || inputs.publish_target == 'python') }}
     name: Build Windows backend wheels
     runs-on: windows-latest
     steps:
@@ -87,7 +98,7 @@ jobs:
 
   # Merge artifacts from both platforms and publish to PyPI.
   publish:
-    if: ${{ !github.event.act }}
+    if: ${{ !github.event.act && (github.event_name != 'workflow_dispatch' || inputs.publish_target == 'all' || inputs.publish_target == 'python') }}
     name: Publish to PyPI
     needs: [build-linux, build-windows]
     runs-on: ubuntu-latest
@@ -115,7 +126,7 @@ jobs:
 
   # Build the Windows native library for the .NET P/Invoke NuGet package.
   dotnet-build-windows:
-    if: ${{ !github.event.act }}
+    if: ${{ !github.event.act && (github.event_name != 'workflow_dispatch' || inputs.publish_target == 'all' || inputs.publish_target == 'dotnet') }}
     name: Build Windows .NET native library
     runs-on: windows-latest
     steps:
@@ -150,7 +161,7 @@ jobs:
 
   # Build and publish .NET NuGet packages.
   dotnet-publish:
-    if: ${{ !github.event.act }}
+    if: ${{ !github.event.act && (github.event_name != 'workflow_dispatch' || inputs.publish_target == 'all' || inputs.publish_target == 'dotnet') }}
     name: Publish .NET NuGet packages
     needs: [dotnet-build-windows]
     runs-on: ubuntu-latest
