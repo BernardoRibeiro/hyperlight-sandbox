@@ -137,6 +137,9 @@ jobs:
           just wasm build release
           just js build release
 
+      - name: Compile WIT world
+        run: just wasm guest-compile-wit
+
       - name: Build Windows native library
         run: just dotnet build-rust release
 
@@ -185,6 +188,9 @@ jobs:
         run: |
           just wasm build release
           just js build release
+
+      - name: Compile WIT world
+        run: just wasm guest-compile-wit
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
