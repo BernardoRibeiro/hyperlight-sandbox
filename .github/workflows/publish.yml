@@ -154,10 +154,11 @@ jobs:
       - name: Install LLVM
         run: choco install llvm -y
 
-      - name: Build sandbox runtimes
-        run: |
-          just wasm build release
-          just js build release
+      - name: Build WASM sandbox runtime
+        run: just wasm build release
+
+      - name: Build JavaScript sandbox runtime
+        run: just js build release
 
       - name: Compile WIT world
         run: just wasm guest-compile-wit
@@ -217,10 +218,11 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           sudo chmod 666 /dev/kvm
 
-      - name: Build sandbox runtimes
-        run: |
-          just wasm build release
-          just js build release
+      - name: Build WASM sandbox runtime
+        run: just wasm build release
+
+      - name: Build JavaScript sandbox runtime
+        run: just js build release
 
       - name: Compile WIT world
         run: just wasm guest-compile-wit
