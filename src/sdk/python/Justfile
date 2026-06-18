@@ -5,7 +5,7 @@ export WIT_WORLD := repo-root + "/src/wasm_sandbox/wit/sandbox-world.wasm"
 rmrf := if os() == "windows" { "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue" } else { "rm -rf" }
 mkdirp := if os() == "windows" { "New-Item -ItemType Directory -Force" } else { "mkdir -p" }
 
-# Set via env or CLI (e.g. `just interpreters="--interpreter python3.10 python3.13" python-dist`)
+# Set via env or CLI (e.g. `just interpreters="--interpreter python3.10 python3.14" python-dist`)
 # to build wheels for multiple Python versions. Defaults to empty (maturin uses active Python).
 interpreters := env("INTERPRETERS", "")
 
