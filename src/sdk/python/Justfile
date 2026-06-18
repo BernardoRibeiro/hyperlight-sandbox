@@ -8,6 +8,9 @@ mkdirp := if os() == "windows" { "New-Item -ItemType Directory -Force" } else { 
 # Set via env or CLI (e.g. `just interpreters="--interpreter python3.10 python3.14" python-dist`)
 # to build wheels for multiple Python versions. Defaults to empty (maturin uses active Python).
 interpreters := env("INTERPRETERS", "")
+# Atheris currently supports fuzzing on Python <= 3.12. Keep the rest of the
+# SDK test/build surface on the active Python while running fuzz on 3.12.
+fuzz-python := env("FUZZ_PYTHON", "3.12")
 
 dist-root := repo-root + "/dist/pythonsdk"
 core-dist := dist-root + "/core"
@@ -32,23 +35,23 @@ python-sync-guest-resources:
 # Install pure Python dependencies from the lockfile into the local venv.
 # Skips the two Rust backend packages — those are compiled and installed
 # separately by `python-install-backends` via `maturin develop`.
-python-sync-env:
-    uv sync --frozen --inexact --no-install-package hyperlight-sandbox-backend-wasm --no-install-package hyperlight-sandbox-backend-hyperlight-js
+python-sync-env python-version="":
+    uv sync {{ if python-version != "" { "--python " + python-version } else { "" } }} --frozen --inexact --no-install-package hyperlight-sandbox-backend-wasm --no-install-package hyperlight-sandbox-backend-hyperlight-js
 
 # Install maturin backends into the local venv for development (maturin develop).
 # This compiles the Rust backend crates and installs them as editable packages
 # in the local venv so you can `import hyperlight_sandbox` directly.
 # For distributable wheels, use `python-dist` (maturin build) instead.
 # Use `just python python-build` for debug, `just python python-build release` for release.
-python-install-backends profile="debug":
+python-install-backends profile="debug" python-version="":
     -{{ if profile == "release" { rmrf + " " + repo-root + "/target/release/build/hyperlight-wasm-*" } else { "" } }}
     -{{ if profile == "release" { rmrf + " " + repo-root + "/target/release/.fingerprint/hyperlight-wasm-*" } else { "" } }}
     -{{ if profile == "release" { rmrf + " " + repo-root + "/target/release/build/hyperlight-js-*" } else { "" } }}
     -{{ if profile == "release" { rmrf + " " + repo-root + "/target/release/.fingerprint/hyperlight-js-*" } else { "" } }}
-    cd {{repo-root}}/src/sdk/python/wasm_backend && uv run --no-sync maturin develop {{ if profile == "release" { "--release" } else { "" } }}
-    cd {{repo-root}}/src/sdk/python/hyperlight_js_backend && uv run --no-sync maturin develop {{ if profile == "release" { "--release" } else { "" } }}
+    cd {{repo-root}}/src/sdk/python/wasm_backend && uv run --no-sync {{ if python-version != "" { "--python " + python-version } else { "" } }} maturin develop {{ if profile == "release" { "--release" } else { "" } }}
+    cd {{repo-root}}/src/sdk/python/hyperlight_js_backend && uv run --no-sync {{ if python-version != "" { "--python " + python-version } else { "" } }} maturin develop {{ if profile == "release" { "--release" } else { "" } }}
 
-python-build profile="debug": python-sync-guest-resources python-sync-env (python-install-backends profile)
+python-build profile="debug" python-version="": python-sync-guest-resources (python-sync-env python-version) (python-install-backends profile python-version)
 
 build: python-build
 
@@ -141,5 +144,5 @@ fmt-check:
 python-test: python-build
     uv run python -m unittest discover -s {{repo-root}}/src/sdk/python/core/tests -p 'test_*.py' -v
 
-python-fuzz seconds="60": python-build
-    {{ if os() == "windows" { "echo 'Skipping python fuzz (atheris not available on Windows)'" } else { "uv run --package hyperlight-sandbox --extra dev python " + repo-root + "/src/sdk/python/core/tests/fuzz_tool_dispatch.py -max_total_time=" + seconds } }}
+python-fuzz seconds="60": (python-build "debug" fuzz-python)
+    {{ if os() == "windows" { "echo 'Skipping python fuzz (atheris not available on Windows)'" } else { "uv run --python " + fuzz-python + " --package hyperlight-sandbox --extra dev python " + repo-root + "/src/sdk/python/core/tests/fuzz_tool_dispatch.py -max_total_time=" + seconds } }}

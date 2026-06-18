@@ -537,7 +537,7 @@ source = { editable = "src/sdk/python/core" }
 
 [package.optional-dependencies]
 dev = [
-    { name = "atheris" },
+    { name = "atheris", marker = "python_full_version < '3.13'" },
 ]
 hyperlight-js = [
     { name = "hyperlight-sandbox-backend-hyperlight-js" },
@@ -554,7 +554,7 @@ wasm = [
 
 [package.metadata]
 requires-dist = [
-    { name = "atheris", marker = "extra == 'dev'", specifier = ">=2.3.0" },
+    { name = "atheris", marker = "python_full_version < '3.13' and extra == 'dev'", specifier = ">=2.3.0" },
     { name = "hyperlight-sandbox-backend-hyperlight-js", marker = "extra == 'hyperlight-js'", editable = "src/sdk/python/hyperlight_js_backend" },
     { name = "hyperlight-sandbox-backend-wasm", marker = "extra == 'wasm'", editable = "src/sdk/python/wasm_backend" },
     { name = "hyperlight-sandbox-javascript-guest", marker = "extra == 'javascript-guest'", editable = "src/sdk/python/wasm_guests/javascript_guest" },
