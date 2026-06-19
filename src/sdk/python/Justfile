@@ -1,16 +1,20 @@
 set windows-shell := ["pwsh", "-NoLogo", "-Command"]
 
 repo-root := invocation_directory_native()
+python-root := repo-root + "/src/sdk/python"
 export WIT_WORLD := repo-root + "/src/wasm_sandbox/wit/sandbox-world.wasm"
 rmrf := if os() == "windows" { "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue" } else { "rm -rf" }
 mkdirp := if os() == "windows" { "New-Item -ItemType Directory -Force" } else { "mkdir -p" }
+uv-python-env := "UV_PYTHON"
+python-version-flag := "--python"
 
 # Set via env or CLI (e.g. `just interpreters="--interpreter python3.10 python3.14" python-dist`)
 # to build wheels for multiple Python versions. Defaults to empty (maturin uses active Python).
 interpreters := env("INTERPRETERS", "")
 # Atheris currently supports fuzzing on Python <= 3.12. Keep the rest of the
 # SDK test/build surface on the active Python while running fuzz on 3.12.
-fuzz-python := env("FUZZ_PYTHON", "3.12")
+default-fuzz-python := "3.12"
+fuzz-python := env("FUZZ_PYTHON", default-fuzz-python)
 
 dist-root := repo-root + "/dist/pythonsdk"
 core-dist := dist-root + "/core"
@@ -43,13 +47,24 @@ python-sync-env python-version="":
 # in the local venv so you can `import hyperlight_sandbox` directly.
 # For distributable wheels, use `python-dist` (maturin build) instead.
 # Use `just python python-build` for debug, `just python python-build release` for release.
-python-install-backends profile="debug" python-version="":
+[private]
+python-clean-backend-artifacts profile="debug":
     -{{ if profile == "release" { rmrf + " " + repo-root + "/target/release/build/hyperlight-wasm-*" } else { "" } }}
     -{{ if profile == "release" { rmrf + " " + repo-root + "/target/release/.fingerprint/hyperlight-wasm-*" } else { "" } }}
     -{{ if profile == "release" { rmrf + " " + repo-root + "/target/release/build/hyperlight-js-*" } else { "" } }}
     -{{ if profile == "release" { rmrf + " " + repo-root + "/target/release/.fingerprint/hyperlight-js-*" } else { "" } }}
-    {{ if python-version != "" { if os() == "windows" { "$env:UV_PYTHON = '" + python-version + "'; " } else { "" } } else { "" } }}cd {{repo-root}}/src/sdk/python/wasm_backend{{ if os() == "windows" { "; " } else { " && " } }}{{ if python-version != "" { if os() == "windows" { "" } else { "UV_PYTHON=" + python-version + " " } } else { "" } }}uv run --no-sync {{ if python-version != "" { "--python " + python-version } else { "" } }} maturin develop {{ if profile == "release" { "--release" } else { "" } }}
-    {{ if python-version != "" { if os() == "windows" { "$env:UV_PYTHON = '" + python-version + "'; " } else { "" } } else { "" } }}cd {{repo-root}}/src/sdk/python/hyperlight_js_backend{{ if os() == "windows" { "; " } else { " && " } }}{{ if python-version != "" { if os() == "windows" { "" } else { "UV_PYTHON=" + python-version + " " } } else { "" } }}uv run --no-sync {{ if python-version != "" { "--python " + python-version } else { "" } }} maturin develop {{ if profile == "release" { "--release" } else { "" } }}
+
+[unix]
+[private]
+python-develop-backend backend profile="debug" python-version="":
+    cd {{python-root}}/{{backend}} && {{ if python-version != "" { uv-python-env + "=" + python-version + " " } else { "" } }}uv run --no-sync {{ if python-version != "" { python-version-flag + " " + python-version } else { "" } }} maturin develop {{ if profile == "release" { "--release" } else { "" } }}
+
+[windows]
+[private]
+python-develop-backend backend profile="debug" python-version="":
+    {{ if python-version != "" { "$env:" + uv-python-env + " = '" + python-version + "'; " } else { "" } }}cd {{python-root}}/{{backend}}; uv run --no-sync {{ if python-version != "" { python-version-flag + " " + python-version } else { "" } }} maturin develop {{ if profile == "release" { "--release" } else { "" } }}
+
+python-install-backends profile="debug" python-version="": (python-clean-backend-artifacts profile) (python-develop-backend "wasm_backend" profile python-version) (python-develop-backend "hyperlight_js_backend" profile python-version)
 
 python-build profile="debug" python-version="": python-sync-guest-resources (python-sync-env python-version) (python-install-backends profile python-version)
 
