@@ -54,15 +54,9 @@ python-clean-backend-artifacts profile="debug":
     -{{ if profile == "release" { rmrf + " " + repo-root + "/target/release/build/hyperlight-js-*" } else { "" } }}
     -{{ if profile == "release" { rmrf + " " + repo-root + "/target/release/.fingerprint/hyperlight-js-*" } else { "" } }}
 
-[unix]
 [private]
-python-develop-backend backend profile="debug" python-version="":
-    cd {{python-root}}/{{backend}} && {{ if python-version != "" { uv-python-env + "=" + python-version + " " } else { "" } }}uv run --no-sync {{ if python-version != "" { python-version-flag + " " + python-version } else { "" } }} maturin develop {{ if profile == "release" { "--release" } else { "" } }}
-
-[windows]
-[private]
-python-develop-backend backend profile="debug" python-version="":
-    {{ if python-version != "" { "$env:" + uv-python-env + " = '" + python-version + "'; " } else { "" } }}cd {{python-root}}/{{backend}}; uv run --no-sync {{ if python-version != "" { python-version-flag + " " + python-version } else { "" } }} maturin develop {{ if profile == "release" { "--release" } else { "" } }}
+python-develop-backend backend profile="debug" python-version="" $UV_PYTHON=(if python-version != "" { python-version } else { env(uv-python-env, "") }):
+    uv run --directory {{python-root}}/{{backend}} --no-sync {{ if python-version != "" { python-version-flag + " " + python-version } else { "" } }} maturin develop {{ if profile == "release" { "--release" } else { "" } }}
 
 python-install-backends profile="debug" python-version="": (python-clean-backend-artifacts profile) (python-develop-backend "wasm_backend" profile python-version) (python-develop-backend "hyperlight_js_backend" profile python-version)
 
