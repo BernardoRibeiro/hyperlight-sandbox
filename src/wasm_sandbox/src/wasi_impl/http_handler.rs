@@ -6,7 +6,6 @@
 
 use std::sync::atomic::Ordering;
 
-use hyperlight_host::HyperlightError;
 use hyperlight_sandbox::http as sandbox_http;
 use wasi::http::types::ErrorCode;
 
@@ -21,7 +20,7 @@ use crate::wasi_impl::types::http_outgoing_request::OutgoingRequest;
 use crate::wasi_impl::types::http_request_options::RequestOptions;
 use crate::wasi_impl::types::stream::Stream;
 
-type HlResult<T> = Result<T, HyperlightError>;
+type HlResult<T> = T;
 
 fn wasi_method_to_http_method(
     method: &wasi::http::types::Method,
@@ -58,34 +57,40 @@ impl
         // Network permission check — always performed.
         let authority = match request_data.authority {
             Some(ref a) => a,
-            None => return Ok(Err(ErrorCode::HTTPRequestDenied)),
+            None => return Err(ErrorCode::HTTPRequestDenied),
         };
 
         let http_method = match wasi_method_to_http_method(&request_data.method) {
             Ok(m) => m,
-            Err(e) => return Ok(Err(e)),
+            Err(e) => return Err(e),
         };
 
         let scheme_str = match &request_data.scheme {
             Some(wasi::http::types::Scheme::HTTP) => "http",
             Some(wasi::http::types::Scheme::HTTPS) => "https",
             Some(wasi::http::types::Scheme::Other(_)) => {
-                return Ok(Err(ErrorCode::InternalError(Some(
+                return Err(ErrorCode::InternalError(Some(
                     "only http and https schemes are supported".to_string(),
-                ))));
+                )));
             }
             None => "https",
         };
         let path = request_data.path_with_query.as_deref().unwrap_or("/");
-        let request_url = url::Url::parse(&format!("{scheme_str}://{authority}{path}"))
-            .map_err(|e| HyperlightError::Error(format!("invalid request URL: {e}")))?;
+        let request_url = match url::Url::parse(&format!("{scheme_str}://{authority}{path}")) {
+            Ok(url) => url,
+            Err(e) => {
+                return Err(ErrorCode::InternalError(Some(format!(
+                    "invalid request URL: {e}"
+                ))));
+            }
+        };
 
         {
             let Ok(network) = self.network.lock() else {
-                return Ok(Err(ErrorCode::HTTPRequestDenied));
+                return Err(ErrorCode::HTTPRequestDenied);
             };
             if !network.is_allowed(&request_url, &http_method) {
-                return Ok(Err(ErrorCode::HTTPRequestDenied));
+                return Err(ErrorCode::HTTPRequestDenied);
             }
         }
 
@@ -93,9 +98,9 @@ impl
         let active = self.active_requests.fetch_add(1, Ordering::SeqCst);
         if active >= sandbox_http::MAX_CONCURRENT_REQUESTS {
             self.active_requests.fetch_sub(1, Ordering::SeqCst);
-            return Ok(Err(ErrorCode::InternalError(Some(
+            return Err(ErrorCode::InternalError(Some(
                 "too many concurrent HTTP requests".to_string(),
-            ))));
+            )));
         }
         let active_requests = self.active_requests.clone();
 
@@ -197,6 +202,6 @@ impl
         }
         .spawn();
 
-        Ok(Ok(future_response))
+        Ok(future_response)
     }
 }

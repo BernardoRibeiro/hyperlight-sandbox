@@ -125,13 +125,13 @@ impl bindings::root::component::RootImports for HostState {
         self
     }
 
-    type WasiFilesystemTypes = HostState;
-    fn wasi_filesystem_types(&mut self) -> &mut Self {
+    type WasiFilesystemTypesV020 = HostState;
+    fn wasi_filesystem_types_v0_2_0(&mut self) -> &mut Self {
         self
     }
 
-    type WasiHttpTypes = HostState;
-    fn wasi_http_types(&mut self) -> &mut Self {
+    type WasiHttpTypesV020 = HostState;
+    fn wasi_http_types_v0_2_0(&mut self) -> &mut Self {
         self
     }
 
@@ -197,22 +197,18 @@ impl bindings::root::component::RootImports for HostState {
 }
 
 impl bindings::hyperlight::sandbox::Tools for HostState {
-    fn dispatch(
-        &mut self,
-        name: String,
-        args_json: String,
-    ) -> Result<Result<String, String>, hyperlight_host::HyperlightError> {
+    fn dispatch(&mut self, name: String, args_json: String) -> Result<String, String> {
         let args: serde_json::Value = match serde_json::from_str(&args_json) {
             Ok(args) => args,
-            Err(error) => return Ok(Err(error.to_string())),
+            Err(error) => return Err(error.to_string()),
         };
-        Ok(match self.tools.dispatch(&name, args) {
+        match self.tools.dispatch(&name, args) {
             Ok(v) => match serde_json::to_string(&v) {
                 Ok(s) => Ok(s),
                 Err(e) => Err(format!("serialization failed: {e}")),
             },
             Err(e) => Err(e.to_string()),
-        })
+        }
     }
 }
 
@@ -270,7 +266,7 @@ impl WasmComponentSandbox {
     }
 
     fn run_impl(&mut self, code: &str) -> Result<ExecutionResult> {
-        use bindings::hyperlight::sandbox::Executor;
+        use bindings::hyperlight::sandbox::ExecutorExports;
 
         self.fs
             .lock()

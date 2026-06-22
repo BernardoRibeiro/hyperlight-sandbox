@@ -2,7 +2,6 @@
 #![allow(unused_variables)]
 
 use hyperlight_common::resource::BorrowedResourceGuard;
-use hyperlight_host::HyperlightError;
 use wasi::io::streams;
 
 use crate::HostState;
@@ -11,7 +10,7 @@ use crate::wasi_impl::resource::{BlockOn, Resource};
 use crate::wasi_impl::types::pollable::AnyPollable;
 use crate::wasi_impl::types::stream::Stream;
 
-type HlResult<T> = Result<T, HyperlightError>;
+type HlResult<T> = T;
 
 /// Maximum byte count for a single write-zeroes or random-bytes allocation.
 /// 16 MiB is generous for any legitimate use while preventing host OOM.
@@ -24,7 +23,7 @@ const MAX_ALLOC_BYTES: u64 = 16 * 1024 * 1024;
 impl wasi::io::error::Error for HostState {
     type T = anyhow::Error;
     fn to_debug_string(&mut self, self_: BorrowedResourceGuard<anyhow::Error>) -> HlResult<String> {
-        Ok(self_.to_string())
+        self_.to_string()
     }
 }
 
@@ -37,11 +36,10 @@ impl wasi::io::Error for HostState {}
 impl wasi::io::poll::Pollable for HostState {
     type T = Resource<AnyPollable>;
     fn ready(&mut self, self_: BorrowedResourceGuard<Resource<AnyPollable>>) -> HlResult<bool> {
-        Ok(self_.write().block_on().ready().block_on())
+        self_.write().block_on().ready().block_on()
     }
     fn block(&mut self, self_: BorrowedResourceGuard<Resource<AnyPollable>>) -> HlResult<()> {
         self_.write().block_on().block().block_on();
-        Ok(())
     }
 }
 
@@ -58,7 +56,7 @@ impl wasi::io::Poll for HostState {
             .map(|p| p.write().block_on())
             .collect::<Vec<_>>();
 
-        Ok(poll_fn(move |cx| {
+        poll_fn(move |cx| {
             for (i, pollable) in guards.iter_mut().enumerate() {
                 if let Poll::Ready(true) = pollable.poll(cx) {
                     return Poll::Ready(vec![i as u32]);
@@ -66,7 +64,7 @@ impl wasi::io::Poll for HostState {
             }
             Poll::Pending
         })
-        .block_on())
+        .block_on()
     }
 }
 
@@ -82,9 +80,9 @@ impl streams::InputStream<anyhow::Error, Resource<AnyPollable>> for HostState {
         len: u64,
     ) -> HlResult<Result<Vec<u8>, streams::StreamError<anyhow::Error>>> {
         let mut guard = self_.write().block_on();
-        Ok(guard
+        guard
             .read(len as usize)
-            .map_err(|_| streams::StreamError::Closed))
+            .map_err(|_| streams::StreamError::Closed)
     }
     fn blocking_read(
         &mut self,
@@ -92,9 +90,9 @@ impl streams::InputStream<anyhow::Error, Resource<AnyPollable>> for HostState {
         len: u64,
     ) -> HlResult<Result<Vec<u8>, streams::StreamError<anyhow::Error>>> {
         let mut guard = self_.write_wait_until(Stream::readable).block_on();
-        Ok(guard
+        guard
             .read(len as usize)
-            .map_err(|_| streams::StreamError::Closed))
+            .map_err(|_| streams::StreamError::Closed)
     }
     fn skip(
         &mut self,
@@ -102,10 +100,10 @@ impl streams::InputStream<anyhow::Error, Resource<AnyPollable>> for HostState {
         len: u64,
     ) -> HlResult<Result<u64, streams::StreamError<anyhow::Error>>> {
         let mut guard = self_.write().block_on();
-        Ok(guard
+        guard
             .read(len as usize)
             .map(|d| d.len() as u64)
-            .map_err(|_| streams::StreamError::Closed))
+            .map_err(|_| streams::StreamError::Closed)
     }
     fn blocking_skip(
         &mut self,
@@ -113,16 +111,16 @@ impl streams::InputStream<anyhow::Error, Resource<AnyPollable>> for HostState {
         len: u64,
     ) -> HlResult<Result<u64, streams::StreamError<anyhow::Error>>> {
         let mut guard = self_.write_wait_until(Stream::readable).block_on();
-        Ok(guard
+        guard
             .read(len as usize)
             .map(|d| d.len() as u64)
-            .map_err(|_| streams::StreamError::Closed))
+            .map_err(|_| streams::StreamError::Closed)
     }
     fn subscribe(
         &mut self,
         self_: BorrowedResourceGuard<Resource<Stream>>,
     ) -> HlResult<Resource<AnyPollable>> {
-        Ok(self_.poll(|b| b.readable()))
+        self_.poll(|b| b.readable())
     }
 }
 
@@ -133,9 +131,9 @@ impl streams::OutputStream<anyhow::Error, Resource<Stream>, Resource<AnyPollable
         self_: BorrowedResourceGuard<Resource<Stream>>,
     ) -> HlResult<Result<u64, streams::StreamError<anyhow::Error>>> {
         let guard = self_.read().block_on();
-        Ok(guard
+        guard
             .check_write()
-            .map_err(|_| streams::StreamError::Closed))
+            .map_err(|_| streams::StreamError::Closed)
     }
     fn write(
         &mut self,
@@ -143,9 +141,9 @@ impl streams::OutputStream<anyhow::Error, Resource<Stream>, Resource<AnyPollable
         contents: Vec<u8>,
     ) -> HlResult<Result<(), streams::StreamError<anyhow::Error>>> {
         let mut guard = self_.write().block_on();
-        Ok(guard
+        guard
             .write(&contents)
-            .map_err(|_| streams::StreamError::Closed))
+            .map_err(|_| streams::StreamError::Closed)
     }
     fn blocking_write_and_flush(
         &mut self,
@@ -154,32 +152,32 @@ impl streams::OutputStream<anyhow::Error, Resource<Stream>, Resource<AnyPollable
     ) -> HlResult<Result<(), streams::StreamError<anyhow::Error>>> {
         let mut guard = self_.write_wait_until(Stream::writable).block_on();
         if guard.write(&contents).is_err() {
-            return Ok(Err(streams::StreamError::Closed));
+            return Err(streams::StreamError::Closed);
         }
         if guard.flush().is_err() {
-            return Ok(Err(streams::StreamError::Closed));
+            return Err(streams::StreamError::Closed);
         }
-        Ok(Ok(()))
+        Ok(())
     }
     fn flush(
         &mut self,
         self_: BorrowedResourceGuard<Resource<Stream>>,
     ) -> HlResult<Result<(), streams::StreamError<anyhow::Error>>> {
         let mut guard = self_.write().block_on();
-        Ok(guard.flush().map_err(|_| streams::StreamError::Closed))
+        guard.flush().map_err(|_| streams::StreamError::Closed)
     }
     fn blocking_flush(
         &mut self,
         self_: BorrowedResourceGuard<Resource<Stream>>,
     ) -> HlResult<Result<(), streams::StreamError<anyhow::Error>>> {
         let mut guard = self_.write().block_on();
-        Ok(guard.flush().map_err(|_| streams::StreamError::Closed))
+        guard.flush().map_err(|_| streams::StreamError::Closed)
     }
     fn subscribe(
         &mut self,
         self_: BorrowedResourceGuard<Resource<Stream>>,
     ) -> HlResult<Resource<AnyPollable>> {
-        Ok(self_.poll(|b| b.writable()))
+        self_.poll(|b| b.writable())
     }
     fn write_zeroes(
         &mut self,
@@ -188,9 +186,9 @@ impl streams::OutputStream<anyhow::Error, Resource<Stream>, Resource<AnyPollable
     ) -> HlResult<Result<(), streams::StreamError<anyhow::Error>>> {
         let capped = len.min(MAX_ALLOC_BYTES) as usize;
         let mut guard = self_.write().block_on();
-        Ok(guard
+        guard
             .write(vec![0; capped])
-            .map_err(|_| streams::StreamError::Closed))
+            .map_err(|_| streams::StreamError::Closed)
     }
     fn blocking_write_zeroes_and_flush(
         &mut self,
@@ -200,12 +198,12 @@ impl streams::OutputStream<anyhow::Error, Resource<Stream>, Resource<AnyPollable
         let capped = len.min(MAX_ALLOC_BYTES) as usize;
         let mut guard = self_.write().block_on();
         if guard.write(vec![0; capped]).is_err() {
-            return Ok(Err(streams::StreamError::Closed));
+            return Err(streams::StreamError::Closed);
         }
         if guard.flush().is_err() {
-            return Ok(Err(streams::StreamError::Closed));
+            return Err(streams::StreamError::Closed);
         }
-        Ok(Ok(()))
+        Ok(())
     }
     fn splice(
         &mut self,
@@ -215,10 +213,10 @@ impl streams::OutputStream<anyhow::Error, Resource<Stream>, Resource<AnyPollable
     ) -> HlResult<Result<u64, streams::StreamError<anyhow::Error>>> {
         let mut dst_guard = self_.write().block_on();
         let mut src_guard = src.write().block_on();
-        Ok(dst_guard
+        dst_guard
             .splice(&mut src_guard, len as usize)
             .map(|n| n as u64)
-            .map_err(|_| streams::StreamError::Closed))
+            .map_err(|_| streams::StreamError::Closed)
     }
     fn blocking_splice(
         &mut self,
@@ -228,10 +226,10 @@ impl streams::OutputStream<anyhow::Error, Resource<Stream>, Resource<AnyPollable
     ) -> HlResult<Result<u64, streams::StreamError<anyhow::Error>>> {
         let mut dst_guard = self_.write_wait_until(Stream::writable).block_on();
         let mut src_guard = src.write_wait_until(Stream::readable).block_on();
-        Ok(dst_guard
+        dst_guard
             .splice(&mut src_guard, len as usize)
             .map(|n| n as u64)
-            .map_err(|_| streams::StreamError::Closed))
+            .map_err(|_| streams::StreamError::Closed)
     }
 }
 
