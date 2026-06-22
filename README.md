@@ -57,6 +57,8 @@ Requires [KVM](https://help.ubuntu.com/community/KVM/Installation), [MSHV](https
 
 Python SDK:
 
+The Python SDK and packaged Wasm guest wheels support CPython 3.10 through 3.14.
+
 ```shell
 uv pip install "hyperlight-sandbox[wasm,python_guest]"
 ```
