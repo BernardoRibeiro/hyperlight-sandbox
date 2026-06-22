@@ -60,10 +60,7 @@ impl
             None => return Err(ErrorCode::HTTPRequestDenied),
         };
 
-        let http_method = match wasi_method_to_http_method(&request_data.method) {
-            Ok(m) => m,
-            Err(e) => return Err(e),
-        };
+        let http_method = wasi_method_to_http_method(&request_data.method)?;
 
         let scheme_str = match &request_data.scheme {
             Some(wasi::http::types::Scheme::HTTP) => "http",
