@@ -2,7 +2,6 @@
 #![allow(unused_variables)]
 
 use hyperlight_common::resource::BorrowedResourceGuard;
-use hyperlight_host::HyperlightError;
 use wasi::http::types as http_types;
 
 use crate::HostState;
@@ -22,7 +21,7 @@ use crate::wasi_impl::types::http_response_outparam::ResponseOutparam;
 use crate::wasi_impl::types::pollable::AnyPollable;
 use crate::wasi_impl::types::stream::Stream;
 
-type HlResult<T> = Result<T, HyperlightError>;
+type HlResult<T> = T;
 
 // ---------------------------------------------------------------------------
 // Fields (Headers/Trailers)
@@ -49,23 +48,23 @@ impl http_types::Fields for HostState {
         &mut self,
         entries: Vec<(String, Vec<u8>)>,
     ) -> HlResult<Result<Resource<Headers>, http_types::HeaderError>> {
-        Ok(Headers::from_list(entries)
+        Headers::from_list(entries)
             .map(Resource::new)
-            .map_err(Into::into))
+            .map_err(Into::into)
     }
     fn get(
         &mut self,
         self_: BorrowedResourceGuard<Resource<Headers>>,
         name: String,
     ) -> HlResult<Vec<Vec<u8>>> {
-        Ok(self_.read().block_on().get(name).unwrap_or_default())
+        self_.read().block_on().get(name).unwrap_or_default()
     }
     fn has(
         &mut self,
         self_: BorrowedResourceGuard<Resource<Headers>>,
         name: String,
     ) -> HlResult<bool> {
-        Ok(self_.read().block_on().has(name))
+        self_.read().block_on().has(name)
     }
     fn set(
         &mut self,
@@ -73,18 +72,18 @@ impl http_types::Fields for HostState {
         name: String,
         value: Vec<Vec<u8>>,
     ) -> HlResult<Result<(), http_types::HeaderError>> {
-        Ok(self_
+        self_
             .write()
             .block_on()
             .set(name, value)
-            .map_err(Into::into))
+            .map_err(Into::into)
     }
     fn delete(
         &mut self,
         self_: BorrowedResourceGuard<Resource<Headers>>,
         name: String,
     ) -> HlResult<Result<(), http_types::HeaderError>> {
-        Ok(self_.write().block_on().delete(name).map_err(Into::into))
+        self_.write().block_on().delete(name).map_err(Into::into)
     }
     fn append(
         &mut self,
@@ -92,23 +91,23 @@ impl http_types::Fields for HostState {
         name: String,
         value: Vec<u8>,
     ) -> HlResult<Result<(), http_types::HeaderError>> {
-        Ok(self_
+        self_
             .write()
             .block_on()
             .append(name, value)
-            .map_err(Into::into))
+            .map_err(Into::into)
     }
     fn entries(
         &mut self,
         self_: BorrowedResourceGuard<Resource<Headers>>,
     ) -> HlResult<Vec<(String, Vec<u8>)>> {
-        Ok(self_.read().block_on().entries())
+        self_.read().block_on().entries()
     }
     fn clone(
         &mut self,
         self_: BorrowedResourceGuard<Resource<Headers>>,
     ) -> HlResult<Resource<Headers>> {
-        Ok(self_.clone())
+        self_.clone()
     }
 }
 
@@ -122,31 +121,31 @@ impl http_types::IncomingRequest<Resource<Headers>, Resource<IncomingBody>> for 
         &mut self,
         self_: BorrowedResourceGuard<Resource<IncomingRequest>>,
     ) -> HlResult<http_types::Method> {
-        Ok(self_.read().block_on().method.clone())
+        self_.read().block_on().method.clone()
     }
     fn path_with_query(
         &mut self,
         self_: BorrowedResourceGuard<Resource<IncomingRequest>>,
     ) -> HlResult<Option<String>> {
-        Ok(self_.read().block_on().path_with_query.clone())
+        self_.read().block_on().path_with_query.clone()
     }
     fn scheme(
         &mut self,
         self_: BorrowedResourceGuard<Resource<IncomingRequest>>,
     ) -> HlResult<Option<http_types::Scheme>> {
-        Ok(self_.read().block_on().scheme.clone())
+        self_.read().block_on().scheme.clone()
     }
     fn authority(
         &mut self,
         self_: BorrowedResourceGuard<Resource<IncomingRequest>>,
     ) -> HlResult<Option<String>> {
-        Ok(self_.read().block_on().authority.clone())
+        self_.read().block_on().authority.clone()
     }
     fn headers(
         &mut self,
         self_: BorrowedResourceGuard<Resource<IncomingRequest>>,
     ) -> HlResult<Resource<Headers>> {
-        Ok(self_.read().block_on().headers.clone())
+        self_.read().block_on().headers.clone()
     }
     fn consume(
         &mut self,
@@ -154,10 +153,10 @@ impl http_types::IncomingRequest<Resource<Headers>, Resource<IncomingBody>> for 
     ) -> HlResult<Result<Resource<IncomingBody>, ()>> {
         let mut guard = self_.write().block_on();
         if guard.body_taken {
-            return Ok(Err(()));
+            return Err(());
         }
         guard.body_taken = true;
-        Ok(Ok(guard.body.clone()))
+        Ok(guard.body.clone())
     }
 }
 
@@ -175,13 +174,13 @@ impl http_types::OutgoingRequest<Resource<Headers>, Resource<OutgoingBody>> for 
         self_: BorrowedResourceGuard<Resource<OutgoingRequest>>,
     ) -> HlResult<Result<Resource<OutgoingBody>, ()>> {
         let mut guard = self_.write().block_on();
-        Ok(guard.take_body().ok_or(()))
+        guard.take_body().ok_or(())
     }
     fn method(
         &mut self,
         self_: BorrowedResourceGuard<Resource<OutgoingRequest>>,
     ) -> HlResult<http_types::Method> {
-        Ok(self_.read().block_on().method.clone())
+        self_.read().block_on().method.clone()
     }
     fn set_method(
         &mut self,
@@ -189,13 +188,13 @@ impl http_types::OutgoingRequest<Resource<Headers>, Resource<OutgoingBody>> for 
         method: http_types::Method,
     ) -> HlResult<Result<(), ()>> {
         self_.write().block_on().method = method;
-        Ok(Ok(()))
+        Ok(())
     }
     fn path_with_query(
         &mut self,
         self_: BorrowedResourceGuard<Resource<OutgoingRequest>>,
     ) -> HlResult<Option<String>> {
-        Ok(self_.read().block_on().path_with_query.clone())
+        self_.read().block_on().path_with_query.clone()
     }
     fn set_path_with_query(
         &mut self,
@@ -203,13 +202,13 @@ impl http_types::OutgoingRequest<Resource<Headers>, Resource<OutgoingBody>> for 
         path_with_query: Option<String>,
     ) -> HlResult<Result<(), ()>> {
         self_.write().block_on().path_with_query = path_with_query;
-        Ok(Ok(()))
+        Ok(())
     }
     fn scheme(
         &mut self,
         self_: BorrowedResourceGuard<Resource<OutgoingRequest>>,
     ) -> HlResult<Option<http_types::Scheme>> {
-        Ok(self_.read().block_on().scheme.clone())
+        self_.read().block_on().scheme.clone()
     }
     fn set_scheme(
         &mut self,
@@ -217,13 +216,13 @@ impl http_types::OutgoingRequest<Resource<Headers>, Resource<OutgoingBody>> for 
         scheme: Option<http_types::Scheme>,
     ) -> HlResult<Result<(), ()>> {
         self_.write().block_on().scheme = scheme;
-        Ok(Ok(()))
+        Ok(())
     }
     fn authority(
         &mut self,
         self_: BorrowedResourceGuard<Resource<OutgoingRequest>>,
     ) -> HlResult<Option<String>> {
-        Ok(self_.read().block_on().authority.clone())
+        self_.read().block_on().authority.clone()
     }
     fn set_authority(
         &mut self,
@@ -231,13 +230,13 @@ impl http_types::OutgoingRequest<Resource<Headers>, Resource<OutgoingBody>> for 
         authority: Option<String>,
     ) -> HlResult<Result<(), ()>> {
         self_.write().block_on().authority = authority;
-        Ok(Ok(()))
+        Ok(())
     }
     fn headers(
         &mut self,
         self_: BorrowedResourceGuard<Resource<OutgoingRequest>>,
     ) -> HlResult<Resource<Headers>> {
-        Ok(self_.read().block_on().headers.clone())
+        self_.read().block_on().headers.clone()
     }
 }
 
@@ -258,12 +257,12 @@ impl http_types::RequestOptions<u64> for HostState {
         &mut self,
         self_: BorrowedResourceGuard<Resource<RequestOptions>>,
     ) -> HlResult<Option<u64>> {
-        Ok(self_
+        self_
             .read()
             .block_on()
             .connect_timeout
             .as_ref()
-            .map(as_u64_nanos_saturating))
+            .map(as_u64_nanos_saturating)
     }
     fn set_connect_timeout(
         &mut self,
@@ -271,18 +270,18 @@ impl http_types::RequestOptions<u64> for HostState {
         duration: Option<u64>,
     ) -> HlResult<Result<(), ()>> {
         self_.write().block_on().connect_timeout = duration.map(std::time::Duration::from_nanos);
-        Ok(Ok(()))
+        Ok(())
     }
     fn first_byte_timeout(
         &mut self,
         self_: BorrowedResourceGuard<Resource<RequestOptions>>,
     ) -> HlResult<Option<u64>> {
-        Ok(self_
+        self_
             .read()
             .block_on()
             .first_byte_timeout
             .as_ref()
-            .map(as_u64_nanos_saturating))
+            .map(as_u64_nanos_saturating)
     }
     fn set_first_byte_timeout(
         &mut self,
@@ -290,18 +289,18 @@ impl http_types::RequestOptions<u64> for HostState {
         duration: Option<u64>,
     ) -> HlResult<Result<(), ()>> {
         self_.write().block_on().first_byte_timeout = duration.map(std::time::Duration::from_nanos);
-        Ok(Ok(()))
+        Ok(())
     }
     fn between_bytes_timeout(
         &mut self,
         self_: BorrowedResourceGuard<Resource<RequestOptions>>,
     ) -> HlResult<Option<u64>> {
-        Ok(self_
+        self_
             .read()
             .block_on()
             .between_bytes_timeout
             .as_ref()
-            .map(as_u64_nanos_saturating))
+            .map(as_u64_nanos_saturating)
     }
     fn set_between_bytes_timeout(
         &mut self,
@@ -310,7 +309,7 @@ impl http_types::RequestOptions<u64> for HostState {
     ) -> HlResult<Result<(), ()>> {
         self_.write().block_on().between_bytes_timeout =
             duration.map(std::time::Duration::from_nanos);
-        Ok(Ok(()))
+        Ok(())
     }
 }
 
@@ -326,7 +325,6 @@ impl http_types::ResponseOutparam<Resource<OutgoingResponse>> for HostState {
         response: Result<Resource<OutgoingResponse>, http_types::ErrorCode>,
     ) -> HlResult<()> {
         param.write().block_on().response = Some(response);
-        Ok(())
     }
 }
 
@@ -340,13 +338,13 @@ impl http_types::IncomingResponse<Resource<Headers>, Resource<IncomingBody>> for
         &mut self,
         self_: BorrowedResourceGuard<Resource<IncomingResponse>>,
     ) -> HlResult<u16> {
-        Ok(self_.read().block_on().status)
+        self_.read().block_on().status
     }
     fn headers(
         &mut self,
         self_: BorrowedResourceGuard<Resource<IncomingResponse>>,
     ) -> HlResult<Resource<Headers>> {
-        Ok(self_.read().block_on().headers.clone())
+        self_.read().block_on().headers.clone()
     }
     fn consume(
         &mut self,
@@ -354,10 +352,10 @@ impl http_types::IncomingResponse<Resource<Headers>, Resource<IncomingBody>> for
     ) -> HlResult<Result<Resource<IncomingBody>, ()>> {
         let mut guard = self_.write().block_on();
         if guard.body_taken {
-            return Ok(Err(()));
+            return Err(());
         }
         guard.body_taken = true;
-        Ok(Ok(guard.body.clone()))
+        Ok(guard.body.clone())
     }
 }
 
@@ -373,13 +371,13 @@ impl http_types::IncomingBody<Resource<FutureHeaders>, Resource<Stream>> for Hos
     ) -> HlResult<Result<Resource<Stream>, ()>> {
         let mut guard = self_.write().block_on();
         if guard.stream_taken {
-            return Ok(Err(()));
+            return Err(());
         }
         guard.stream_taken = true;
-        Ok(Ok(guard.stream.clone()))
+        Ok(guard.stream.clone())
     }
     fn finish(&mut self, this: Resource<IncomingBody>) -> HlResult<Resource<FutureHeaders>> {
-        Ok(this.read().block_on().trailers.clone())
+        this.read().block_on().trailers.clone()
     }
 }
 
@@ -395,10 +393,10 @@ impl http_types::OutgoingBody<Resource<Headers>, Resource<Stream>> for HostState
     ) -> HlResult<Result<Resource<Stream>, ()>> {
         let mut guard = self_.write().block_on();
         if guard.body_taken {
-            return Ok(Err(()));
+            return Err(());
         }
         guard.body_taken = true;
-        Ok(Ok(guard.body.clone()))
+        Ok(guard.body.clone())
     }
     fn finish(
         &mut self,
@@ -409,7 +407,7 @@ impl http_types::OutgoingBody<Resource<Headers>, Resource<Stream>> for HostState
         let (_, written) = guard.body.write().block_on().close();
         guard.finished = true;
         guard.trailers = trailers.unwrap_or_default();
-        Ok(Ok(()))
+        Ok(())
     }
 }
 
@@ -426,7 +424,7 @@ impl http_types::OutgoingResponse<Resource<Headers>, Resource<OutgoingBody>> for
         &mut self,
         self_: BorrowedResourceGuard<Resource<OutgoingResponse>>,
     ) -> HlResult<u16> {
-        Ok(self_.read().block_on().status_code)
+        self_.read().block_on().status_code
     }
     fn set_status_code(
         &mut self,
@@ -434,20 +432,20 @@ impl http_types::OutgoingResponse<Resource<Headers>, Resource<OutgoingBody>> for
         status_code: u16,
     ) -> HlResult<Result<(), ()>> {
         self_.write().block_on().status_code = status_code;
-        Ok(Ok(()))
+        Ok(())
     }
     fn headers(
         &mut self,
         self_: BorrowedResourceGuard<Resource<OutgoingResponse>>,
     ) -> HlResult<Resource<Headers>> {
-        Ok(self_.read().block_on().headers.clone())
+        self_.read().block_on().headers.clone()
     }
     fn body(
         &mut self,
         self_: BorrowedResourceGuard<Resource<OutgoingResponse>>,
     ) -> HlResult<Result<Resource<OutgoingBody>, ()>> {
         let mut guard = self_.write().block_on();
-        Ok(guard.take_body().ok_or(()))
+        guard.take_body().ok_or(())
     }
 }
 
@@ -461,20 +459,20 @@ impl http_types::FutureTrailers<Resource<Headers>, Resource<AnyPollable>> for Ho
         &mut self,
         self_: BorrowedResourceGuard<Resource<FutureHeaders>>,
     ) -> HlResult<Resource<AnyPollable>> {
-        Ok(self_.poll(|r| r.is_ready()))
+        self_.poll(|r| r.is_ready())
     }
     fn get(
         &mut self,
         self_: BorrowedResourceGuard<Resource<FutureHeaders>>,
     ) -> HlResult<Option<Result<Result<Option<Resource<Headers>>, http_types::ErrorCode>, ()>>>
     {
-        Ok(match self_.write().block_on().get() {
+        match self_.write().block_on().get() {
             Some(Ok(Ok(headers))) if headers.read().block_on().is_empty() => Some(Ok(Ok(None))),
             Some(Ok(Ok(headers))) => Some(Ok(Ok(Some(headers)))),
             Some(Ok(Err(e))) => Some(Ok(Err(e))),
             Some(Err(())) => Some(Err(())),
             None => None,
-        })
+        }
     }
 }
 
@@ -490,14 +488,14 @@ impl http_types::FutureIncomingResponse<Resource<IncomingResponse>, Resource<Any
         &mut self,
         self_: BorrowedResourceGuard<Resource<FutureIncomingResponse>>,
     ) -> HlResult<Resource<AnyPollable>> {
-        Ok(self_.poll(|r| r.is_ready()))
+        self_.poll(|r| r.is_ready())
     }
     fn get(
         &mut self,
         self_: BorrowedResourceGuard<Resource<FutureIncomingResponse>>,
     ) -> HlResult<Option<Result<Result<Resource<IncomingResponse>, http_types::ErrorCode>, ()>>>
     {
-        Ok(self_.write().block_on().get())
+        self_.write().block_on().get()
     }
 }
 
@@ -513,8 +511,6 @@ impl
         &mut self,
         err: BorrowedResourceGuard<anyhow::Error>,
     ) -> HlResult<Option<http_types::ErrorCode>> {
-        Ok(Some(http_types::ErrorCode::InternalError(Some(
-            err.to_string(),
-        ))))
+        Some(http_types::ErrorCode::InternalError(Some(err.to_string())))
     }
 }
