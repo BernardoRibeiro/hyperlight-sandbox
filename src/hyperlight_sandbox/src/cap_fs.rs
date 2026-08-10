@@ -98,6 +98,8 @@ bitflags::bitflags! {
         const CREATE = 0b01;
         /// Truncate the file to zero length.
         const TRUNCATE = 0b10;
+        /// Require the path to resolve to a directory.
+        const DIRECTORY = 0b100;
     }
 }
 
@@ -139,10 +141,13 @@ impl Dir {
 // Internal types
 // ---------------------------------------------------------------------------
 
-#[derive(Clone)]
-struct FileEntry {
-    name: String,
-    dir_fd: u32,
+struct DescriptorEntry {
+    root_fd: u32,
+    relative_path: PathBuf,
+    descriptor_type: DescriptorType,
+    is_preopen: bool,
+    parent_fd: Option<u32>,
+    directory: Option<Dir>,
 }
 
 #[derive(Clone)]
@@ -154,6 +159,7 @@ struct StreamState {
 
 #[derive(Clone)]
 struct DirStreamState {
+    dir_fd: u32,
     entries: Vec<(String, bool)>,
     cursor: usize,
 }
@@ -178,7 +184,8 @@ pub struct CapFs {
     // The fd assigned to the output preopen (if configured).
     output_fd: Option<u32>,
 
-    open_files: HashMap<u32, FileEntry>,
+    // All filesystem descriptors, including preopens and opened descendants.
+    descriptors: HashMap<u32, DescriptorEntry>,
     streams: HashMap<u32, StreamState>,
     dir_streams: HashMap<u32, DirStreamState>,
     next_handle: u32,
@@ -204,7 +211,7 @@ impl CapFs {
         Self {
             preopen_dirs: HashMap::new(),
             output_fd: None,
-            open_files: HashMap::new(),
+            descriptors: HashMap::new(),
             streams: HashMap::new(),
             dir_streams: HashMap::new(),
             next_handle: FIRST_PREOPEN_FD,
@@ -222,16 +229,11 @@ impl CapFs {
                     input_path.as_ref().display()
                 )
             })?;
-        let fd = self
-            .alloc_handle()
-            .map_err(|err| anyhow::anyhow!("{err:?}"))?;
-        self.preopen_dirs.insert(
-            fd,
-            PreopenEntry {
-                dir: Dir::new(input_cap, DirPerms::READ, FilePerms::READ),
-                guest_path: "/input".to_string(),
-            },
-        );
+        self.register_preopen(
+            Dir::new(input_cap, DirPerms::READ, FilePerms::READ),
+            "/input",
+        )
+        .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         Ok(self)
     }
 
@@ -241,19 +243,15 @@ impl CapFs {
         let output_cap = CapDir::open_ambient_dir(output_tmp.path(), ambient_authority())
             .context("failed to open output temp dir")?;
         let fd = self
-            .alloc_handle()
-            .map_err(|err| anyhow::anyhow!("{err:?}"))?;
-        self.preopen_dirs.insert(
-            fd,
-            PreopenEntry {
-                dir: Dir::new(
+            .register_preopen(
+                Dir::new(
                     output_cap,
                     DirPerms::READ | DirPerms::MUTATE,
                     FilePerms::READ | FilePerms::WRITE,
                 ),
-                guest_path: "/output".to_string(),
-            },
-        );
+                "/output",
+            )
+            .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         self.output_fd = Some(fd);
         self.output_path = Some(output_tmp.path().to_path_buf());
         self._output_tmp = Some(output_tmp);
@@ -275,15 +273,8 @@ impl CapFs {
                 )
             })?;
         let fd = self
-            .alloc_handle()
+            .register_preopen(Dir::new(output_cap, dir_perms, file_perms), "/output")
             .map_err(|err| anyhow::anyhow!("{err:?}"))?;
-        self.preopen_dirs.insert(
-            fd,
-            PreopenEntry {
-                dir: Dir::new(output_cap, dir_perms, file_perms),
-                guest_path: "/output".to_string(),
-            },
-        );
         self.output_fd = Some(fd);
         self.output_path = Some(output_path.as_ref().to_path_buf());
         Ok(self)
@@ -312,19 +303,6 @@ impl CapFs {
             .with_context(|| format!("failed to create output file: {key}"))?;
         file.write_all(&data)
             .with_context(|| format!("failed to write output file: {key}"))?;
-
-        if self.find_file_in_dir(output_fd, &key).is_none() {
-            let fd = self
-                .alloc_handle()
-                .map_err(|err| anyhow::anyhow!("{err:?}"))?;
-            self.open_files.insert(
-                fd,
-                FileEntry {
-                    name: key,
-                    dir_fd: output_fd,
-                },
-            );
-        }
         Ok(())
     }
 
@@ -421,24 +399,17 @@ impl CapFs {
                 }
             }
         }
-        self.open_files.retain(|_, e| e.dir_fd != output_fd);
+        self.descriptors
+            .retain(|_, e| e.root_fd != output_fd || e.is_preopen);
         self.streams.clear();
         self.dir_streams.clear();
-        let min_handle = self
-            .preopen_dirs
+        self.next_handle = self
+            .descriptors
             .keys()
             .copied()
             .max()
             .map(|h| h + 1)
             .unwrap_or(FIRST_PREOPEN_FD);
-        self.next_handle = self
-            .open_files
-            .keys()
-            .copied()
-            .max()
-            .map(|h| h + 1)
-            .unwrap_or(min_handle)
-            .max(min_handle);
     }
 
     /// Clear output directory. Input is host-managed and left untouched.
@@ -451,11 +422,13 @@ impl CapFs {
     // -----------------------------------------------------------------------
 
     pub fn get_dir(&self, fd: u32) -> Option<&Dir> {
-        self.preopen_dirs.get(&fd).map(|e| &e.dir)
+        self.descriptors.get(&fd)?.directory.as_ref()
     }
 
     pub fn is_directory(&self, fd: u32) -> bool {
-        self.preopen_dirs.contains_key(&fd)
+        self.descriptors
+            .get(&fd)
+            .is_some_and(|e| e.descriptor_type == DescriptorType::Directory)
     }
 
     /// Find a preopened directory by its guest-visible path.
@@ -467,18 +440,28 @@ impl CapFs {
     }
 
     pub fn is_file(&self, fd: u32) -> bool {
-        self.open_files.contains_key(&fd)
+        self.descriptors
+            .get(&fd)
+            .is_some_and(|e| e.descriptor_type == DescriptorType::RegularFile)
     }
 
     pub fn file_size(&self, fd: u32) -> Option<u64> {
-        let entry = self.open_files.get(&fd)?;
-        let dir = self.get_dir(entry.dir_fd)?;
-        Some(dir.cap_std().metadata(&entry.name).ok()?.len())
+        let entry = self.descriptors.get(&fd)?;
+        if entry.descriptor_type != DescriptorType::RegularFile {
+            return None;
+        }
+        let dir = self.get_dir(entry.root_fd)?;
+        Some(dir.cap_std().metadata(&entry.relative_path).ok()?.len())
     }
 
     pub fn find_file_in_dir(&self, dir_fd: u32, name: &str) -> Option<u32> {
-        for (&fd, entry) in &self.open_files {
-            if entry.dir_fd == dir_fd && entry.name == name {
+        for (&fd, entry) in &self.descriptors {
+            if entry.descriptor_type != DescriptorType::RegularFile {
+                continue;
+            }
+            if entry.parent_fd == Some(dir_fd)
+                && entry.relative_path.file_name().and_then(|n| n.to_str()) == Some(name)
+            {
                 return Some(fd);
             }
         }
@@ -487,14 +470,18 @@ impl CapFs {
 
     /// Return the parent directory fd for an open file.
     pub fn file_dir_fd(&self, fd: u32) -> Option<u32> {
-        self.open_files.get(&fd).map(|e| e.dir_fd)
+        self.descriptors
+            .get(&fd)
+            .filter(|e| e.descriptor_type == DescriptorType::RegularFile)
+            .and_then(|e| e.parent_fd)
     }
 
     /// Check if a file's parent directory grants the given file permissions.
     pub fn file_has_perms(&self, fd: u32, perms: FilePerms) -> bool {
-        self.open_files
+        self.descriptors
             .get(&fd)
-            .and_then(|e| self.get_dir(e.dir_fd))
+            .filter(|e| e.descriptor_type == DescriptorType::RegularFile)
+            .and_then(|e| self.get_dir(e.root_fd))
             .is_some_and(|dir| dir.file_perms().contains(perms))
     }
 
@@ -554,8 +541,8 @@ impl CapFs {
                 mutate_directory: dir.perms().contains(DirPerms::MUTATE),
             })
         } else if self.is_file(fd) {
-            let dir_fd = self.file_dir_fd(fd).ok_or(FsError::BadDescriptor)?;
-            let dir = self.get_dir(dir_fd).ok_or(FsError::BadDescriptor)?;
+            let entry = self.descriptors.get(&fd).ok_or(FsError::BadDescriptor)?;
+            let dir = self.root_dir(entry.root_fd).ok_or(FsError::BadDescriptor)?;
             Ok(DescriptorFlags {
                 read: dir.file_perms().contains(FilePerms::READ),
                 write: dir.file_perms().contains(FilePerms::WRITE),
@@ -570,45 +557,46 @@ impl CapFs {
     // File operations (cap-std backed)
     // -----------------------------------------------------------------------
 
-    /// Maximum number of open file handles to prevent resource exhaustion.
-    const MAX_OPEN_FILES: usize = 1024;
+    /// Maximum number of open descendant descriptors.
+    const MAX_OPEN_DESCRIPTORS: usize = 1024;
 
     /// Cap single read allocation to prevent guest-triggered OOM.
     const MAX_READ_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
 
     pub fn open_at(&mut self, dir_fd: u32, path: &str, flags: OpenFlags) -> Result<u32, FsError> {
-        let dir = self.get_dir(dir_fd).ok_or(FsError::BadDescriptor)?;
-
-        if path.is_empty()
-            || path == "."
-            || path == ".."
-            || path.contains('/')
-            || path.contains('\\')
-            || path.contains('\0')
-        {
-            return Err(FsError::InvalidPath);
-        }
+        let (root_fd, relative_path) = self.resolve_at(dir_fd, path)?;
+        let dir = self
+            .get_dir(dir_fd)
+            .cloned()
+            .ok_or(FsError::BadDescriptor)?;
 
         let create = flags.contains(OpenFlags::CREATE);
         let truncate = flags.contains(OpenFlags::TRUNCATE);
+        let require_directory = flags.contains(OpenFlags::DIRECTORY);
 
         if (create || truncate) && !dir.perms().contains(DirPerms::MUTATE) {
             return Err(FsError::NotPermitted);
         }
 
-        if let Some(fd) = self.find_file_in_dir(dir_fd, path) {
-            if truncate {
-                let _ = dir.cap_std().create(path);
-            }
-            return Ok(fd);
-        }
-
-        let exists = dir.cap_std().metadata(path).is_ok();
+        let metadata = dir.cap_std().metadata(path).ok();
+        let exists = metadata.is_some();
         if !exists && !create {
             return Err(FsError::NoEntry);
         }
-        if self.open_files.len() >= Self::MAX_OPEN_FILES {
-            return Err(FsError::Io("too many open files".into()));
+        if require_directory && !metadata.as_ref().is_some_and(|meta| meta.is_dir()) {
+            return Err(FsError::NoEntry);
+        }
+        if truncate && metadata.as_ref().is_some_and(|meta| meta.is_dir()) {
+            return Err(FsError::InvalidPath);
+        }
+        if self
+            .descriptors
+            .values()
+            .filter(|entry| !entry.is_preopen)
+            .count()
+            >= Self::MAX_OPEN_DESCRIPTORS
+        {
+            return Err(FsError::Io("too many open descriptors".into()));
         }
         if !exists || truncate {
             dir.cap_std()
@@ -616,20 +604,65 @@ impl CapFs {
                 .map_err(|e| FsError::Io(e.to_string()))?;
         }
 
+        let metadata = dir
+            .cap_std()
+            .metadata(path)
+            .map_err(|e| FsError::Io(e.to_string()))?;
+        let descriptor_type = if metadata.is_dir() {
+            DescriptorType::Directory
+        } else {
+            DescriptorType::RegularFile
+        };
+        let directory = if descriptor_type == DescriptorType::Directory {
+            let opened = dir
+                .cap_std()
+                .open_dir(path)
+                .map_err(|e| FsError::Io(e.to_string()))?;
+            Some(Dir::new(opened, dir.perms(), dir.file_perms()))
+        } else {
+            None
+        };
+
         let fd = self.alloc_handle()?;
-        self.open_files.insert(
+        self.descriptors.insert(
             fd,
-            FileEntry {
-                name: path.to_string(),
-                dir_fd,
+            DescriptorEntry {
+                root_fd,
+                relative_path,
+                descriptor_type,
+                is_preopen: false,
+                parent_fd: Some(dir_fd),
+                directory,
             },
         );
         Ok(fd)
     }
 
-    /// Close an open file handle, freeing the descriptor.
+    /// Close an opened descendant descriptor and any streams derived from it.
+    ///
+    /// Preopen descriptors are owned by the filesystem and cannot be closed
+    /// through this method. Descendants of a closed directory remain valid:
+    /// each descriptor retains its own root-relative identity/capability.
+    pub fn close_descriptor(&mut self, fd: u32) -> Result<(), FsError> {
+        let entry = self.descriptors.get(&fd).ok_or(FsError::BadDescriptor)?;
+        if entry.is_preopen {
+            return Err(FsError::NotPermitted);
+        }
+        self.descriptors.remove(&fd);
+        // When closing a descriptor (fd), also remove any associated file streams and directory streams.
+        // This ensures that any open file or directory streams that reference the closed descriptor
+        // are also closed and removed from their respective maps.
+        // Retains only the elements specified by the predicate.
+        self.streams.retain(|_, stream| stream.file_fd != fd);
+        self.dir_streams.retain(|_, stream| stream.dir_fd != fd);
+        Ok(())
+    }
+
+    /// Close an open file or directory handle, freeing the descriptor.
     pub fn close_file(&mut self, fd: u32) {
-        self.open_files.remove(&fd);
+        if self.is_file(fd) {
+            let _ = self.close_descriptor(fd);
+        }
     }
 
     /// Close a stream handle, freeing the descriptor.
@@ -643,14 +676,13 @@ impl CapFs {
     }
 
     pub fn read_file(&self, fd: u32, offset: u64, len: u64) -> Result<(Vec<u8>, bool), FsError> {
-        let entry = self.open_files.get(&fd).ok_or(FsError::BadDescriptor)?;
-        let dir = self.get_dir(entry.dir_fd).ok_or(FsError::BadDescriptor)?;
-        if !dir.file_perms().contains(FilePerms::READ) {
+        let (root, path) = self.file_parts(fd)?;
+        if !root.file_perms().contains(FilePerms::READ) {
             return Err(FsError::NotPermitted);
         }
-        let mut file = dir
+        let mut file = root
             .cap_std()
-            .open(&entry.name)
+            .open(path)
             .map_err(|e| FsError::Io(e.to_string()))?;
         let file_size = file
             .metadata()
@@ -675,16 +707,15 @@ impl CapFs {
     }
 
     pub fn write_file(&mut self, fd: u32, offset: u64, buffer: &[u8]) -> Result<u64, FsError> {
-        let entry = self.open_files.get(&fd).ok_or(FsError::BadDescriptor)?;
-        let dir = self.get_dir(entry.dir_fd).ok_or(FsError::BadDescriptor)?;
-        if !dir.file_perms().contains(FilePerms::WRITE) {
+        let (root, path) = self.file_parts(fd)?;
+        if !root.file_perms().contains(FilePerms::WRITE) {
             return Err(FsError::NotPermitted);
         }
         let mut opts = cap_std::fs::OpenOptions::new();
         opts.read(true).write(true);
-        let mut file = dir
+        let mut file = root
             .cap_std()
-            .open_with(&entry.name, &opts)
+            .open_with(path, &opts)
             .map_err(|e| FsError::Io(e.to_string()))?;
 
         let file_size = file
@@ -757,14 +788,10 @@ impl CapFs {
         let file_fd = stream.file_fd;
         let offset = stream.offset;
 
-        let entry = self
-            .open_files
-            .get(&file_fd)
-            .ok_or(FsError::BadDescriptor)?;
-        let dir = self.get_dir(entry.dir_fd).ok_or(FsError::BadDescriptor)?;
-        let mut file = dir
+        let (root, path) = self.file_parts(file_fd)?;
+        let mut file = root
             .cap_std()
-            .open(&entry.name)
+            .open(path)
             .map_err(|e| FsError::Io(e.to_string()))?;
         let file_size = file
             .metadata()
@@ -841,6 +868,7 @@ impl CapFs {
         self.dir_streams.insert(
             id,
             DirStreamState {
+                dir_fd,
                 entries: file_entries,
                 cursor: 0,
             },
@@ -873,6 +901,71 @@ impl CapFs {
     // -----------------------------------------------------------------------
     // Internals
     // -----------------------------------------------------------------------
+
+    fn register_preopen(&mut self, dir: Dir, guest_path: &str) -> Result<u32, FsError> {
+        let fd = self.alloc_handle()?;
+        self.preopen_dirs.insert(
+            fd,
+            PreopenEntry {
+                dir: dir.clone(),
+                guest_path: guest_path.to_string(),
+            },
+        );
+        self.descriptors.insert(
+            fd,
+            DescriptorEntry {
+                root_fd: fd,
+                relative_path: PathBuf::new(),
+                descriptor_type: DescriptorType::Directory,
+                is_preopen: true,
+                parent_fd: None,
+                directory: Some(dir),
+            },
+        );
+        Ok(fd)
+    }
+
+    fn validate_relative_component(path: &str) -> Result<(), FsError> {
+        if path.is_empty()
+            || path == "."
+            || path == ".."
+            || path.contains('/')
+            || path.contains('\\')
+            || path.contains('\0')
+        {
+            return Err(FsError::InvalidPath);
+        }
+        Ok(())
+    }
+
+    /// Resolve one path component relative to an opened directory while
+    /// retaining the descriptor's preopen-relative identity.
+    fn resolve_at(&self, dir_fd: u32, path: &str) -> Result<(u32, PathBuf), FsError> {
+        Self::validate_relative_component(path)?;
+        let parent = self
+            .descriptors
+            .get(&dir_fd)
+            .ok_or(FsError::BadDescriptor)?;
+        if parent.descriptor_type != DescriptorType::Directory || parent.directory.is_none() {
+            return Err(FsError::BadDescriptor);
+        }
+        let mut relative_path = parent.relative_path.clone();
+        relative_path.push(path);
+        Ok((parent.root_fd, relative_path))
+    }
+
+    fn root_dir(&self, root_fd: u32) -> Option<&Dir> {
+        self.preopen_dirs.get(&root_fd).map(|e| &e.dir)
+    }
+
+    fn file_parts(&self, fd: u32) -> Result<(&Dir, &Path), FsError> {
+        let entry = self.descriptors.get(&fd).ok_or(FsError::BadDescriptor)?;
+        if entry.descriptor_type != DescriptorType::RegularFile {
+            return Err(FsError::BadDescriptor);
+        }
+        let root = self.root_dir(entry.root_fd).ok_or(FsError::BadDescriptor)?;
+        Ok((root, entry.relative_path.as_path()))
+    }
 
     fn normalize_path(path: &str, root: &str) -> Result<String> {
         let trimmed = path.trim();
@@ -915,6 +1008,7 @@ impl CapFs {
 
 // No Clone — snapshots don't need filesystem state. Input is immutable
 // (shared via Arc) and output is ephemeral (wiped each run).
+//TODO: include filesystem state in snapshots
 
 #[cfg(test)]
 mod tests {
@@ -942,6 +1036,10 @@ mod tests {
 
     fn host_write_output(output: &tempfile::TempDir, name: &str, data: &[u8]) {
         std::fs::write(output.path().join(name), data).unwrap();
+    }
+
+    fn host_create_dir(root: &tempfile::TempDir, name: &str) {
+        std::fs::create_dir_all(root.path().join(name)).unwrap();
     }
 
     /// Look up the fd for a preopen by guest path.
@@ -977,6 +1075,115 @@ mod tests {
     }
 
     #[test]
+    fn opened_directory_is_typed_and_lists_its_own_entries() {
+        let (mut fs, input, _o) = test_fs();
+        host_create_dir(&input, "src/nested");
+        host_write_input(&input, "root.txt", b"root");
+        host_write_input(&input, "src/lib.rs", b"pub fn library() {}");
+
+        let input_fd = preopen_fd(&fs, "/input");
+        let src_fd = fs.open_at(input_fd, "src", OpenFlags::DIRECTORY).unwrap();
+
+        assert!(fs.is_directory(src_fd));
+        assert_eq!(fs.get_type(src_fd), Ok(DescriptorType::Directory));
+        assert_eq!(
+            fs.stat(src_fd),
+            Ok(DescriptorStat {
+                descriptor_type: DescriptorType::Directory,
+                size: 0,
+            })
+        );
+        assert_eq!(
+            fs.stat_at(src_fd, "lib.rs"),
+            Ok(DescriptorStat {
+                descriptor_type: DescriptorType::RegularFile,
+                size: 19,
+            })
+        );
+
+        let stream = fs.create_dir_stream(src_fd).unwrap();
+        let mut entries = Vec::new();
+        while let Some(Some(entry)) = fs.read_dir_entry(stream) {
+            entries.push(entry);
+        }
+        entries.sort();
+        assert_eq!(
+            entries,
+            vec![("lib.rs".to_string(), false), ("nested".to_string(), true)]
+        );
+    }
+
+    #[test]
+    fn file_opened_relative_to_directory_survives_parent_close() {
+        let (mut fs, input, _o) = test_fs();
+        host_create_dir(&input, "src");
+        host_write_input(&input, "src/lib.rs", b"nested file");
+
+        let input_fd = preopen_fd(&fs, "/input");
+        let src_fd = fs.open_at(input_fd, "src", OpenFlags::DIRECTORY).unwrap();
+        let file_fd = fs
+            .open_at(src_fd, "lib.rs", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+
+        assert_eq!(fs.file_dir_fd(file_fd), Some(src_fd));
+        assert_eq!(fs.get_type(file_fd), Ok(DescriptorType::RegularFile));
+        assert_eq!(fs.read_file(file_fd, 0, 100).unwrap().0, b"nested file");
+
+        fs.close_descriptor(src_fd).unwrap();
+        assert_eq!(fs.get_type(src_fd), Err(FsError::BadDescriptor));
+        assert_eq!(fs.read_file(file_fd, 0, 100).unwrap().0, b"nested file");
+        assert_eq!(
+            fs.get_flags(file_fd),
+            Ok(DescriptorFlags {
+                read: true,
+                write: false,
+                mutate_directory: false,
+            })
+        );
+    }
+
+    #[test]
+    fn file_created_through_nested_directory_descriptors_uses_root_relative_path() {
+        let (mut fs, _i, output) = test_fs();
+        host_create_dir(&output, "build/cache");
+
+        let output_fd = preopen_fd(&fs, "/output");
+        let build_fd = fs
+            .open_at(output_fd, "build", OpenFlags::DIRECTORY)
+            .unwrap();
+        let cache_fd = fs.open_at(build_fd, "cache", OpenFlags::DIRECTORY).unwrap();
+        let file_fd = fs
+            .open_at(cache_fd, "result.txt", OpenFlags::CREATE)
+            .unwrap();
+
+        fs.write_file(file_fd, 0, b"nested output").unwrap();
+        assert_eq!(
+            std::fs::read(output.path().join("build/cache/result.txt")).unwrap(),
+            b"nested output"
+        );
+        assert_eq!(fs.read_file(file_fd, 0, 100).unwrap().0, b"nested output");
+    }
+
+    #[test]
+    fn opening_same_path_returns_independent_descriptors() {
+        let (mut fs, input, _o) = test_fs();
+        host_write_input(&input, "same.txt", b"same contents");
+
+        let input_fd = preopen_fd(&fs, "/input");
+        let first = fs
+            .open_at(input_fd, "same.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+        let second = fs
+            .open_at(input_fd, "same.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+
+        assert_ne!(first, second);
+        fs.close_descriptor(first).unwrap();
+        assert_eq!(fs.get_type(first), Err(FsError::BadDescriptor));
+        assert_eq!(fs.read_file(second, 0, 100).unwrap().0, b"same contents");
+    }
+
+    #[test]
     fn output_write_and_collect() {
         let (mut fs, _i, _o) = test_fs();
         let output_fd = preopen_fd(&fs, "/output");
@@ -1007,6 +1214,36 @@ mod tests {
         let (data, _) = fs.read_file(fd, 0, 100).unwrap();
         assert_eq!(data, b"input");
         assert!(fs.get_output_files().is_empty());
+    }
+
+    #[test]
+    fn clear_output_invalidates_only_output_descriptors() {
+        let (mut fs, input, output) = test_fs();
+        host_create_dir(&input, "src");
+        host_write_input(&input, "src/lib.rs", b"input");
+        host_create_dir(&output, "build");
+        host_write_output(&output, "build/result.txt", b"output");
+
+        let input_fd = preopen_fd(&fs, "/input");
+        let output_fd = preopen_fd(&fs, "/output");
+        let input_dir = fs.open_at(input_fd, "src", OpenFlags::DIRECTORY).unwrap();
+        let input_file = fs
+            .open_at(input_dir, "lib.rs", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+        let output_dir = fs
+            .open_at(output_fd, "build", OpenFlags::DIRECTORY)
+            .unwrap();
+        let output_file = fs
+            .open_at(output_dir, "result.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+
+        fs.clear_output_files();
+
+        assert_eq!(fs.get_type(input_dir), Ok(DescriptorType::Directory));
+        assert_eq!(fs.read_file(input_file, 0, 100).unwrap().0, b"input");
+        assert_eq!(fs.get_type(output_dir), Err(FsError::BadDescriptor));
+        assert_eq!(fs.get_type(output_file), Err(FsError::BadDescriptor));
+        assert_eq!(fs.get_type(output_fd), Ok(DescriptorType::Directory));
     }
 
     #[test]
@@ -1134,6 +1371,51 @@ mod tests {
             fs.open_at(output_fd, "file-name_v2.tar.gz", OpenFlags::CREATE)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn directory_flag_rejects_regular_file() {
+        let (mut fs, input, _o) = test_fs();
+        host_write_input(&input, "file.txt", b"data");
+        let input_fd = preopen_fd(&fs, "/input");
+
+        assert_eq!(
+            fs.open_at(input_fd, "file.txt", OpenFlags::DIRECTORY),
+            Err(FsError::NoEntry)
+        );
+    }
+
+    #[test]
+    fn close_descriptor_invalidates_derived_streams() {
+        let (mut fs, _i, output) = test_fs();
+        host_create_dir(&output, "dir");
+        let output_fd = preopen_fd(&fs, "/output");
+
+        let file_fd = fs
+            .open_at(output_fd, "file.txt", OpenFlags::CREATE)
+            .unwrap();
+        fs.write_file(file_fd, 0, b"data").unwrap();
+        let file_stream = fs.create_read_stream(file_fd, 0).unwrap();
+
+        let dir_fd = fs.open_at(output_fd, "dir", OpenFlags::DIRECTORY).unwrap();
+        let dir_stream = fs.create_dir_stream(dir_fd).unwrap();
+
+        fs.close_descriptor(file_fd).unwrap();
+        assert!(!fs.has_stream(file_stream));
+        assert_eq!(fs.stream_read(file_stream, 1), Err(FsError::BadDescriptor));
+
+        fs.close_descriptor(dir_fd).unwrap();
+        assert!(!fs.has_dir_stream(dir_stream));
+        assert_eq!(fs.read_dir_entry(dir_stream), None);
+    }
+
+    #[test]
+    fn preopen_descriptor_cannot_be_closed() {
+        let (mut fs, _i, _o) = test_fs();
+        let input_fd = preopen_fd(&fs, "/input");
+
+        assert_eq!(fs.close_descriptor(input_fd), Err(FsError::NotPermitted));
+        assert_eq!(fs.get_type(input_fd), Ok(DescriptorType::Directory));
     }
 
     #[test]

@@ -1,0 +1,14 @@
+tool: run_bash
+timestamp: 2026-08-04T13:50:12.618098+00:00
+arguments:
+{
+  "command": "git --no-pager show --name-only --pretty=\"\" HEAD",
+  "cwd": "/home/vagrant/testbeds/CLI_Tools_Easy"
+}
+
+result:
+exit_code=0
+--- stdout ---
+tests/features/shlex_join_test.py
+--- stderr ---
+(empty)

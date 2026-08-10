@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-"""Agent Framework + Hyperlight Wasm sandbox example (code mode).
+"""Agent Framework + Hyperlight Wasm sandbox example.
 
 Supports OpenAI (default: gpt-5-mini) or GitHub Copilot as the chat backend.
-
-Default architecture:
-  - The model calls execute_code with Python snippets.
-  - Guest code reaches the host testbed via call_tool(...) for file and git ops.
-  - Sandbox Python state is kept across execute_code turns (no restore).
-  - Arbitrary run_bash is not exposed (use dedicated git tools instead).
+Exposes tools for operating on a host testbed (read_file, write_file, run_bash)
+plus execute_code for isolated Python in a Hyperlight Wasm sandbox.
 """
 
 from __future__ import annotations
@@ -35,95 +31,57 @@ from hyperlight_sandbox import Sandbox
 from pydantic import Field
 
 DEFAULT_OPENAI_MODEL = "gpt-5-mini"
-DEFAULT_GIT_TIMEOUT_S = 120
+DEFAULT_BASH_TIMEOUT_S = 600
 MAX_FILE_CHARS = 100_000
-MAX_LIST_ENTRIES = 500
-LIST_SKIP_DIR_NAMES = frozenset(
-    {
-        ".git",
-        ".venv",
-        "__pycache__",
-        ".pytest_cache",
-        ".mypy_cache",
-        ".tox",
-        "node_modules",
-        "dist",
-        "build",
-    }
-)
 
 SYSTEM_PROMPT = """You are a coding agent working on a local testbed directory.
 
-IMPORTANT: Do NOT call host tools directly. Always write Python and call execute_code.
-Inside the Hyperlight Wasm sandbox, call_tool() is a built-in (no import needed).
-Sandbox Python state persists across execute_code turns — you may reuse variables.
+Tools:
+- read_file(path): read a file relative to the testbed root
+- write_file(path, content): create/overwrite a file relative to the testbed root
+- run_bash(command): run a shell command with cwd set to the testbed root
+- execute_code(code): run Python in an isolated Hyperlight Wasm sandbox
 
-Host tools available only via call_tool inside execute_code:
+Use read_file / write_file / run_bash for repository exploration, edits, and tests.
+Use execute_code for small isolated Python experiments that should not touch the testbed.
+Prefer small, targeted edits. After changing code, run the project's tests with run_bash.
 
-File operations:
-  call_tool('read_file', path='relative/path.py')
-  call_tool('write_file', path='relative/path.py', content='...')
-  call_tool('list_files', path='.', recursive=True)
-
-Git operations (no arbitrary shell):
-  call_tool('git_status')
-  call_tool('git_diff', staged=False, path=None)
-  call_tool('git_log', max_count=10)
-  call_tool('git_show', revision='HEAD')
-  call_tool('git_add', paths=['file.py'])
-  call_tool('git_commit', message='short commit message')
-
-Paths are relative to the testbed root. Prefer small, targeted edits.
-There is no run_bash / pytest tool in this mode — explore and edit with file/git tools,
-reason about correctness from code and tests you read, then commit when appropriate.
-Always print tool results (or summaries) so they appear in execute_code stdout.
-"""
+A project virtualenv is prepared at `.venv` in the testbed. Prefer:
+  pytest -q
+  python -m pytest -q
+Do NOT install packages into other environments. If deps are missing, use:
+  uv pip install -e . -r requirements-dev.txt
+Always report command output and the final git diff when you finish a fix."""
 
 ISSUE_SOLVE_PROMPT = """Fix the issue described below. The repository is already checked out in the testbed.
 
-Complete the workflow using execute_code + call_tool only:
-1. Read issue.md / explore with list_files and read_file
-2. Implement the fix with write_file
-3. Review related tests with read_file; adjust code/tests as needed
-4. Show git_diff, then git_add + git_commit when the fix looks correct
-5. Finish with git_status / git_show summarizing what changed
+IMPORTANT: Complete the FULL workflow:
+1. Read and understand the issue thoroughly
+2. Explore the codebase to find relevant files
+3. Implement the fix with write_file (or carefully targeted edits)
+4. Run the project's original test suite with run_bash, e.g. `pytest -q` or `pytest -q tests/features/...`
+5. If ANY test fails, analyze the error and fix it
+6. Repeat steps 4-5 until tests pass
+7. Stop only when tests pass, then show the final git diff via run_bash
 
-Multi-turn is fine: keep using execute_code; sandbox state persists between turns.
-Do NOT invent a shell/pytest tool — it is not available.
+Do NOT write custom verification scripts to bypass the project tests.
+Success means the project's real test suite passes.
+A `.venv` with project + dev deps is already available on PATH for run_bash.
 
 ## Issue (from issue.md)
 
 {issue}
 """
 
-SMOKE_TEST_PROMPT = """Run a quick end-to-end code-mode smoke test. Do exactly these steps in one or more execute_code calls:
+SMOKE_TEST_PROMPT = """Run a quick end-to-end tool smoke test on the testbed. Do exactly these steps:
 
-1. call_tool('write_file', path='smoke_hello.py', content='print(\"smoke-test-ok\")\\n')
-2. call_tool('read_file', path='smoke_hello.py') and print the result
-3. call_tool('list_files', path='.', recursive=False) and print the result
-4. call_tool('git_status') and print the result
-5. Stop. Success means read_file returned content containing smoke-test-ok.
+1. Use write_file to create `smoke_hello.py` with this exact content:
+   print("smoke-test-ok")
+2. Use read_file to read `smoke_hello.py` back and confirm the content.
+3. Use run_bash to execute: python smoke_hello.py
+4. Report the command exit code and stdout. Success means stdout contains smoke-test-ok.
 
-Do not solve any repository issue.
-"""
-
-SMOKE_TEST_PROMPT_NO_SANDBOX = """Run a quick host-tool smoke test. Do exactly these steps:
-
-1. write_file('smoke_hello.py', 'print(\"smoke-test-ok\")\\n')
-2. read_file('smoke_hello.py') and confirm content
-3. list_files('.', recursive=False)
-4. git_status()
-5. Stop. Success means read_file returned content containing smoke-test-ok.
-
-Do not solve any repository issue.
-"""
-
-NO_SANDBOX_SYSTEM_PROMPT = """You are a coding agent working on a local testbed directory.
-
-Hyperlight execute_code is disabled. Use the host tools directly:
-  read_file, write_file, list_files, git_status, git_diff, git_log, git_show, git_add, git_commit
-
-Paths are relative to the testbed root. There is no run_bash tool.
+Do not solve any repository issue. Stop after the smoke test.
 """
 
 
@@ -133,6 +91,7 @@ _testbed_root: Path | None = None
 _log_dir: Path | None = None
 _tool_call_seq = 0
 _sandbox = None
+_snapshot = None
 _input_dir = None
 
 
@@ -236,7 +195,7 @@ def parse_args() -> argparse.Namespace:
         "--testbed",
         type=Path,
         default=None,
-        help="Root directory the file/git tools may access (default: temp demo dir)",
+        help="Root directory the file/bash tools may access (default: temp demo dir)",
     )
     parser.add_argument(
         "--issue",
@@ -253,17 +212,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--smoke-test",
         action="store_true",
-        help="Run a code-mode smoke test (execute_code + call_tool file/git ops)",
+        help="Run a tool smoke test (write_file + read_file + run python) instead of solving issue.md",
     )
     parser.add_argument(
         "--no-sandbox",
         action="store_true",
-        help="Skip Hyperlight; expose file/git host tools directly to the agent",
+        help="Skip Hyperlight sandbox init and omit execute_code (testbed tools only)",
     )
     parser.add_argument(
         "--skip-testbed-venv",
         action="store_true",
-        help="Do not auto-create/install the testbed .venv",
+        help="Do not auto-create/install the testbed .venv (pytest deps)",
     )
     parser.add_argument(
         "--interactive",
@@ -284,10 +243,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-# --- Host tool implementations (shared by call_tool + --no-sandbox) ----------
+# --- Testbed tools -----------------------------------------------------------
 
 
-def _read_file_impl(path: str) -> str:
+@tool
+def read_file(
+    path: Annotated[str, Field(description="File path relative to the testbed root.")],
+) -> str:
+    """Read a UTF-8 text file from the testbed."""
     target = _resolve_testbed_path(path)
     print(f"Reading file: {target}")
     if not target.is_file():
@@ -306,7 +269,12 @@ def _read_file_impl(path: str) -> str:
     return result
 
 
-def _write_file_impl(path: str, content: str) -> str:
+@tool
+def write_file(
+    path: Annotated[str, Field(description="File path relative to the testbed root.")],
+    content: Annotated[str, Field(description="Full file contents to write.")],
+) -> str:
+    """Create or overwrite a UTF-8 text file in the testbed."""
     print(f"Writing file: {path}")
     target = _resolve_testbed_path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -320,236 +288,34 @@ def _write_file_impl(path: str, content: str) -> str:
     return result
 
 
-def _should_skip_dir(name: str) -> bool:
-    if name in LIST_SKIP_DIR_NAMES:
-        return True
-    if name.endswith(".egg-info"):
-        return True
-    return False
+def _bash_env(root: Path) -> dict[str, str]:
+    """Build an env for testbed commands that does not inherit the agent project venv.
 
+    When this script is launched via `uv run`, PATH points at hyperlight-sandbox/.venv
+    (often without pip/pytest). Prefer the testbed's own `.venv` instead.
+    """
+    env = os.environ.copy()
+    env.pop("VIRTUAL_ENV", None)
+    env.pop("PYTHONHOME", None)
+    env.pop("UV_PROJECT_ENVIRONMENT", None)
 
-def _list_files_impl(path: str = ".", recursive: bool = True) -> str:
-    root = _require_testbed().resolve()
-    start = _resolve_testbed_path(path)
-    if not start.exists():
-        result = f"Error: path not found: {path}"
-        _log_tool_call("list_files", {"path": path, "recursive": recursive}, result)
-        return result
-    if start.is_file():
-        rel = start.relative_to(root).as_posix()
-        result = rel
-        _log_tool_call("list_files", {"path": path, "recursive": recursive}, result)
-        return result
+    path_parts = [p for p in env.get("PATH", "").split(os.pathsep) if p]
+    # Drop the hyperlight project venv so `python`/`pytest` resolve to the testbed.
+    project_venv_bin = str((_repo_root() / ".venv" / "bin").resolve())
+    path_parts = [p for p in path_parts if Path(p).resolve().as_posix() != Path(project_venv_bin).as_posix()]
 
-    entries: list[str] = []
-    truncated = False
+    testbed_venv_bin = root / ".venv" / "bin"
+    if testbed_venv_bin.is_dir():
+        path_parts = [str(testbed_venv_bin), *path_parts]
+        env["VIRTUAL_ENV"] = str(root / ".venv")
 
-    if recursive:
-        for dirpath, dirnames, filenames in os.walk(start):
-            dirnames[:] = sorted(d for d in dirnames if not _should_skip_dir(d))
-            for name in sorted(filenames):
-                full = Path(dirpath) / name
-                rel = full.relative_to(root).as_posix()
-                entries.append(rel)
-                if len(entries) >= MAX_LIST_ENTRIES:
-                    truncated = True
-                    break
-            if truncated:
-                break
-    else:
-        for child in sorted(start.iterdir(), key=lambda p: p.name):
-            if child.is_dir() and _should_skip_dir(child.name):
-                continue
-            rel = child.relative_to(root).as_posix()
-            suffix = "/" if child.is_dir() else ""
-            entries.append(rel + suffix)
-            if len(entries) >= MAX_LIST_ENTRIES:
-                truncated = True
-                break
+    # Ensure common user-local tools (uv) remain available.
+    home_local = Path.home() / ".local" / "bin"
+    if home_local.is_dir() and str(home_local) not in path_parts:
+        path_parts.append(str(home_local))
 
-    result = "\n".join(entries) if entries else "(empty)"
-    if truncated:
-        result += f"\n...[truncated at {MAX_LIST_ENTRIES} entries]"
-    _log_tool_call("list_files", {"path": path, "recursive": recursive}, result)
-    return result
-
-
-def _run_git(args: list[str], *, label: str, log_args: dict[str, Any]) -> str:
-    root = _require_testbed()
-    cmd = ["git", *args]
-    print(f"Running git: {' '.join(cmd)}")
-    try:
-        completed = subprocess.run(
-            cmd,
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=DEFAULT_GIT_TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired:
-        result = f"Error: git timed out after {DEFAULT_GIT_TIMEOUT_S}s: {' '.join(cmd)}"
-        _log_tool_call(label, log_args, result)
-        return result
-
-    parts = [
-        f"exit_code={completed.returncode}",
-        "--- stdout ---",
-        completed.stdout.rstrip() or "(empty)",
-        "--- stderr ---",
-        completed.stderr.rstrip() or "(empty)",
-    ]
-    result = "\n".join(parts)
-    _log_tool_call(label, {**log_args, "argv": cmd, "cwd": str(root)}, result)
-    return result
-
-
-def _git_status_impl() -> str:
-    return _run_git(["status", "--porcelain=v1", "--branch"], label="git_status", log_args={})
-
-
-def _git_diff_impl(staged: bool = False, path: str | None = None) -> str:
-    args = ["diff", "--"]
-    if staged:
-        args = ["diff", "--staged", "--"]
-    log_args: dict[str, Any] = {"staged": staged, "path": path}
-    if path:
-        # Validate path stays in testbed even though git gets a relative path.
-        _resolve_testbed_path(path)
-        args.append(path)
-    return _run_git(args, label="git_diff", log_args=log_args)
-
-
-def _git_log_impl(max_count: int = 10) -> str:
-    n = max(1, min(int(max_count), 50))
-    return _run_git(
-        ["log", f"-n{n}", "--oneline", "--decorate"],
-        label="git_log",
-        log_args={"max_count": n},
-    )
-
-
-def _git_show_impl(revision: str = "HEAD") -> str:
-    rev = revision.strip() or "HEAD"
-    # Keep revisions simple; reject shell-ish values.
-    if any(ch.isspace() for ch in rev) or not all(c.isalnum() or c in "._/-~^" for c in rev):
-        result = f"Error: unsupported revision: {revision!r}"
-        _log_tool_call("git_show", {"revision": revision}, result)
-        return result
-    return _run_git(
-        ["show", "--stat", "--patch", "--format=fuller", rev],
-        label="git_show",
-        log_args={"revision": rev},
-    )
-
-
-def _git_add_impl(paths: list[str] | None = None) -> str:
-    if not paths:
-        result = "Error: git_add requires a non-empty paths list"
-        _log_tool_call("git_add", {"paths": paths}, result)
-        return result
-    rel_paths: list[str] = []
-    for p in paths:
-        resolved = _resolve_testbed_path(p)
-        rel_paths.append(resolved.relative_to(_require_testbed().resolve()).as_posix())
-    return _run_git(["add", "--", *rel_paths], label="git_add", log_args={"paths": rel_paths})
-
-
-def _git_commit_impl(message: str) -> str:
-    msg = (message or "").strip()
-    if not msg:
-        result = "Error: git_commit requires a non-empty message"
-        _log_tool_call("git_commit", {"message": message}, result)
-        return result
-    return _run_git(["commit", "-m", msg], label="git_commit", log_args={"message": msg})
-
-
-# Agent-Framework-visible wrappers (used when --no-sandbox)
-
-
-@tool
-def read_file(
-    path: Annotated[str, Field(description="File path relative to the testbed root.")],
-) -> str:
-    """Read a UTF-8 text file from the testbed."""
-    return _read_file_impl(path)
-
-
-@tool
-def write_file(
-    path: Annotated[str, Field(description="File path relative to the testbed root.")],
-    content: Annotated[str, Field(description="Full file contents to write.")],
-) -> str:
-    """Create or overwrite a UTF-8 text file in the testbed."""
-    return _write_file_impl(path, content)
-
-
-@tool
-def list_files(
-    path: Annotated[str, Field(description="Directory or file path relative to the testbed root.")] = ".",
-    recursive: Annotated[bool, Field(description="Recurse into subdirectories (skips .venv/.git/etc).")] = True,
-) -> str:
-    """List files under the testbed path."""
-    return _list_files_impl(path, recursive)
-
-
-@tool
-def git_status() -> str:
-    """Show git status (porcelain) for the testbed repo."""
-    return _git_status_impl()
-
-
-@tool
-def git_diff(
-    staged: Annotated[bool, Field(description="If true, show staged diff.")] = False,
-    path: Annotated[str | None, Field(description="Optional path limit.")] = None,
-) -> str:
-    """Show git diff for the testbed repo."""
-    return _git_diff_impl(staged=staged, path=path)
-
-
-@tool
-def git_log(
-    max_count: Annotated[int, Field(description="Max commits to show (1-50).")] = 10,
-) -> str:
-    """Show recent git log (oneline)."""
-    return _git_log_impl(max_count)
-
-
-@tool
-def git_show(
-    revision: Annotated[str, Field(description="Revision to show (default HEAD).")] = "HEAD",
-) -> str:
-    """Show a git revision (stat + patch)."""
-    return _git_show_impl(revision)
-
-
-@tool
-def git_add(
-    paths: Annotated[list[str], Field(description="Paths to stage, relative to testbed root.")],
-) -> str:
-    """Stage files with git add."""
-    return _git_add_impl(paths)
-
-
-@tool
-def git_commit(
-    message: Annotated[str, Field(description="Commit message.")],
-) -> str:
-    """Create a git commit with the given message."""
-    return _git_commit_impl(message)
-
-
-HOST_TOOLS = [
-    read_file,
-    write_file,
-    list_files,
-    git_status,
-    git_diff,
-    git_log,
-    git_show,
-    git_add,
-    git_commit,
-]
+    env["PATH"] = os.pathsep.join(path_parts)
+    return env
 
 
 def _ensure_testbed_venv(root: Path) -> None:
@@ -563,7 +329,7 @@ def _ensure_testbed_venv(root: Path) -> None:
 
     uv = shutil.which("uv") or str(Path.home() / ".local" / "bin" / "uv")
     if not Path(uv).is_file():
-        print("⚠️  uv not found; skipping testbed venv bootstrap")
+        print("⚠️  uv not found; skipping testbed venv bootstrap (pytest may be unavailable)")
         return
 
     if not venv_dir.is_dir():
@@ -581,52 +347,45 @@ def _ensure_testbed_venv(root: Path) -> None:
     print("✅ Testbed venv ready")
 
 
+@tool
+def run_bash(
+    command: Annotated[str, Field(description="Shell command to run with cwd=testbed root.")],
+) -> str:
+    """Run a bash command inside the testbed directory."""
+    root = _require_testbed()
+    env = _bash_env(root)
+    try:
+        print(f"Running command: {command}")
+        completed = subprocess.run(
+            ["bash", "-lc", command],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=DEFAULT_BASH_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        result = f"Error: command timed out after {DEFAULT_BASH_TIMEOUT_S}s: {command}"
+        _log_tool_call("run_bash", {"command": command, "cwd": str(root)}, result)
+        return result
+    parts = [
+        f"exit_code={completed.returncode}",
+        "--- stdout ---",
+        completed.stdout.rstrip() or "(empty)",
+        "--- stderr ---",
+        completed.stderr.rstrip() or "(empty)",
+    ]
+    result = "\n".join(parts)
+    _log_tool_call("run_bash", {"command": command, "cwd": str(root)}, result)
+    return result
+
+
 # --- Hyperlight sandbox ------------------------------------------------------
 
 
-def _register_sandbox_tools(sandbox: Sandbox) -> None:
-    """Register host callbacks callable from guest via call_tool(...)."""
-    sandbox.register_tool("read_file", lambda **kw: _read_file_impl(str(kw["path"])))
-    sandbox.register_tool(
-        "write_file",
-        lambda **kw: _write_file_impl(str(kw["path"]), str(kw.get("content", ""))),
-    )
-    sandbox.register_tool(
-        "list_files",
-        lambda **kw: _list_files_impl(
-            str(kw.get("path", ".")),
-            bool(kw["recursive"]) if "recursive" in kw else True,
-        ),
-    )
-    sandbox.register_tool("git_status", lambda **_kw: _git_status_impl())
-    sandbox.register_tool(
-        "git_diff",
-        lambda **kw: _git_diff_impl(
-            staged=bool(kw.get("staged", False)),
-            path=kw.get("path"),
-        ),
-    )
-    sandbox.register_tool(
-        "git_log",
-        lambda **kw: _git_log_impl(int(kw.get("max_count", 10))),
-    )
-    sandbox.register_tool(
-        "git_show",
-        lambda **kw: _git_show_impl(str(kw.get("revision", "HEAD"))),
-    )
-    sandbox.register_tool(
-        "git_add",
-        lambda **kw: _git_add_impl(list(kw.get("paths") or [])),
-    )
-    sandbox.register_tool(
-        "git_commit",
-        lambda **kw: _git_commit_impl(str(kw.get("message", ""))),
-    )
-
-
 def _init_sandbox() -> None:
-    """Initialize the sandbox, register host tools, warm up. No per-turn restore."""
-    global _sandbox, _input_dir
+    """Initialize the sandbox and take a snapshot. Call once at program start."""
+    global _sandbox, _snapshot, _input_dir
 
     module_path = _default_module_path()
     if not module_path.exists():
@@ -638,23 +397,27 @@ def _init_sandbox() -> None:
 
     start = time.perf_counter()
     _input_dir = tempfile.TemporaryDirectory(prefix="hyperlight-agent-input-")
+    (Path(_input_dir.name) / "team.json").write_text(
+        '{"members": [{"name": "Alice", "role": "eng"}, {"name": "Bob", "role": "pm"}]}'
+    )
 
     _sandbox = Sandbox(
         backend="wasm",
         module_path=str(module_path),
         input_dir=_input_dir.name,
     )
-    _register_sandbox_tools(_sandbox)
-    # Warm-up only; keep guest globals across later execute_code turns.
+    _sandbox.allow_domain("https://httpbin.org", methods=["GET"])
     _sandbox.run("None")
+    _snapshot = _sandbox.snapshot()
     elapsed_ms = (time.perf_counter() - start) * 1000
-    print(f"📸 Sandbox initialized with host tools registered ({elapsed_ms:.0f}ms)")
+    print(f"📸 Sandbox initialized and snapshotted ({elapsed_ms:.0f}ms)")
 
 
 def _get_sandbox() -> Sandbox:
-    """Return the live sandbox (state persists across execute_code calls)."""
-    if _sandbox is None:
+    """Restore sandbox to clean snapshot state and return it."""
+    if _sandbox is None or _snapshot is None:
         raise RuntimeError("Hyperlight sandbox is not initialized (use without --no-sandbox).")
+    _sandbox.restore(_snapshot)
     return _sandbox
 
 
@@ -662,16 +425,10 @@ def _get_sandbox() -> Sandbox:
 async def execute_code(
     code: Annotated[
         str,
-        Field(
-            description=(
-                "Python code to run in the Hyperlight Wasm sandbox. "
-                "Use call_tool('read_file'|'write_file'|'list_files'|git_*) inside the code. "
-                "Sandbox state persists across calls."
-            ),
-        ),
+        Field(description="Python code to execute in an isolated Hyperlight Wasm sandbox."),
     ],
 ) -> str:
-    """Execute Python in Hyperlight; guest may call registered host tools via call_tool."""
+    """Execute Python in Hyperlight with snapshot/restore between calls."""
     try:
         print(f"--- generated code ---\n{code}\n--- end ---\n")
         sandbox = _get_sandbox()
@@ -700,7 +457,10 @@ async def execute_code(
 
 
 def _use_sandbox(args: argparse.Namespace) -> bool:
-    return not args.no_sandbox
+    """Smoke tests only need testbed tools; sandbox is optional otherwise."""
+    if args.smoke_test or args.no_sandbox:
+        return False
+    return True
 
 
 # --- Agent setup -------------------------------------------------------------
@@ -718,16 +478,6 @@ def _init_testbed(testbed: Path | None, *, bootstrap_venv: bool = True) -> Path:
         demo = Path(tempfile.mkdtemp(prefix="hyperlight-testbed-"))
         (demo / "README.md").write_text("# Demo testbed\n\nCreated by copilot_agent.py\n")
         (demo / "hello.py").write_text("print('hello from testbed')\n")
-        subprocess.run(["git", "init"], cwd=demo, check=True, capture_output=True)
-        subprocess.run(["git", "config", "user.email", "agent@example.com"], cwd=demo, check=True)
-        subprocess.run(["git", "config", "user.name", "agent"], cwd=demo, check=True)
-        subprocess.run(["git", "add", "-A"], cwd=demo, check=True, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", "initial demo testbed"],
-            cwd=demo,
-            check=True,
-            capture_output=True,
-        )
         _testbed_root = demo
         print(f"📁 Testbed (temp demo): {_testbed_root}")
 
@@ -781,12 +531,16 @@ def create_agent(
     *,
     enable_sandbox: bool = True,
 ) -> Any:
+    tools: list[Any] = [read_file, write_file, run_bash]
     if enable_sandbox:
-        tools: list[Any] = [execute_code]
-        instructions = SYSTEM_PROMPT
-    else:
-        tools = list(HOST_TOOLS)
-        instructions = NO_SANDBOX_SYSTEM_PROMPT
+        tools.append(execute_code)
+
+    instructions = SYSTEM_PROMPT
+    if not enable_sandbox:
+        instructions += (
+            "\n\nNote: execute_code / Hyperlight sandbox is disabled for this run. "
+            "Use only read_file, write_file, and run_bash."
+        )
 
     if provider == "openai":
         client = create_chat_client(provider, model)
@@ -820,7 +574,7 @@ async def main(args: argparse.Namespace) -> None:
     if enable_sandbox:
         _init_sandbox()
     else:
-        print("⏭️  Skipping Hyperlight sandbox init (host file/git tools only)")
+        print("⏭️  Skipping Hyperlight sandbox init (testbed tools only)")
     agent = create_agent(
         provider=args.provider,
         model=args.model,
@@ -844,9 +598,7 @@ async def main(args: argparse.Namespace) -> None:
         if args.prompts:
             prompts = args.prompts
         elif args.smoke_test:
-            prompts = [
-                SMOKE_TEST_PROMPT if enable_sandbox else SMOKE_TEST_PROMPT_NO_SANDBOX
-            ]
+            prompts = [SMOKE_TEST_PROMPT]
         else:
             issue_text = _load_issue_text(args.issue)
             prompts = [_build_solve_prompt(issue_text)]

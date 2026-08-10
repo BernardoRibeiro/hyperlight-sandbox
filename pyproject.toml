@@ -43,6 +43,7 @@ copilot-sdk = [
 ]
 agent-framework = [
     "agent-framework-github-copilot>=1.0.0rc1",
+    "agent-framework-openai",
     "pydantic",
     "hyperlight-sandbox",
     "hyperlight-sandbox-backend-wasm",

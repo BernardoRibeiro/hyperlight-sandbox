@@ -367,6 +367,9 @@ impl fs_types::Descriptor<wall_clock::Datetime, u32, Resource<Stream>, Resource<
         if open_flags.r#truncate {
             flags |= hyperlight_sandbox::OpenFlags::TRUNCATE;
         }
+        if open_flags.r#directory {
+            flags |= hyperlight_sandbox::OpenFlags::DIRECTORY;
+        }
         fs.open_at(dir_fd, &path, flags).map_err(Into::into)
     }
     fn metadata_hash_at(

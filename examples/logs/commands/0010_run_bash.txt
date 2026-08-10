@@ -1,0 +1,15 @@
+tool: run_bash
+timestamp: 2026-08-04T13:50:05.413675+00:00
+arguments:
+{
+  "command": "pytest tests/features/shlex_join_test.py -q",
+  "cwd": "/home/vagrant/testbeds/CLI_Tools_Easy"
+}
+
+result:
+exit_code=0
+--- stdout ---
+........                                                                 [100%]
+8 passed in 0.07s
+--- stderr ---
+(empty)

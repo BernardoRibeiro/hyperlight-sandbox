@@ -1,0 +1,14 @@
+tool: run_bash
+timestamp: 2026-08-04T13:49:27.214434+00:00
+arguments:
+{
+  "command": "rg \"shlex.join|join\\(\\s*shlex.quote\" -n || true",
+  "cwd": "/home/vagrant/testbeds/CLI_Tools_Easy"
+}
+
+result:
+exit_code=0
+--- stdout ---
+(empty)
+--- stderr ---
+bash: line 1: rg: command not found

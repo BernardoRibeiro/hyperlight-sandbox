@@ -1,0 +1,480 @@
+=== [1] 2026-08-04T13:49:21.646530+00:00 run_bash ===
+arguments:
+{
+  "command": "pytest -q",
+  "cwd": "/home/vagrant/testbeds/CLI_Tools_Easy"
+}
+result:
+exit_code=0
+--- stdout ---
+........................................................................ [  7%]
+........................................................................ [ 14%]
+........................................................................ [ 22%]
+........................................................................ [ 29%]
+........................................................................ [ 36%]
+........................................................................ [ 44%]
+........................................................................ [ 51%]
+................xxxx.................................................... [ 58%]
+........................................................................ [ 66%]
+........................................................................ [ 73%]
+........................................................................ [ 80%]
+........................................................................ [ 88%]
+........................................................................ [ 95%]
+............................................                             [100%]
+976 passed, 4 xfailed in 1.84s
+--- stderr ---
+(empty)
+
+=== [2] 2026-08-04T13:49:23.433328+00:00 run_bash ===
+arguments:
+{
+  "command": "git status --porcelain; git rev-parse --abbrev-ref HEAD",
+  "cwd": "/home/vagrant/testbeds/CLI_Tools_Easy"
+}
+result:
+exit_code=0
+--- stdout ---
+main
+--- stderr ---
+(empty)
+
+=== [3] 2026-08-04T13:49:27.214434+00:00 run_bash ===
+arguments:
+{
+  "command": "rg \"shlex.join|join\\(\\s*shlex.quote\" -n || true",
+  "cwd": "/home/vagrant/testbeds/CLI_Tools_Easy"
+}
+result:
+exit_code=0
+--- stdout ---
+(empty)
+--- stderr ---
+bash: line 1: rg: command not found
+
+=== [4] 2026-08-04T13:49:29.089527+00:00 run_bash ===
+arguments:
+{
+  "command": "grep -R \"shlex.join\" -n || true",
+  "cwd": "/home/vagrant/testbeds/CLI_Tools_Easy"
+}
+result:
+exit_code=0
+--- stdout ---
+issue.md:1:### "".join(shlex.quote(...) ...) to shlex.join(...) is too eager
+issue.md:10:If I run `pyupgrade --py310-plus` on this, I get `trash_bin = shlex.join(["some", "quotable strings"])`. But this is not equivalent. This is a very contrived case, but there are real cases I could envision,  like `", "`, where one might want to keep the `str.join` 
+pyupgrade.egg-info/SOURCES.txt:40:pyupgrade/_plugins/shlex_join.py
+pyupgrade.egg-info/PKG-INFO:718:### shlex.join
+pyupgrade.egg-info/PKG-INFO:725:+shlex.join(cmd)
+.venv/lib/python3.12/site-packages/pyupgrade-3.15.1.dist-info/METADATA:718:### shlex.join
+.venv/lib/python3.12/site-packages/pyupgrade-3.15.1.dist-info/METADATA:725:+shlex.join(cmd)
+.venv/lib64/python3.12/site-packages/pyupgrade-3.15.1.dist-info/METADATA:718:### shlex.join
+.venv/lib64/python3.12/site-packages/pyupgrade-3.15.1.dist-info/METADATA:725:+shlex.join(cmd)
+tests/features/shlex_join_test.py:26:def test_shlex_join_noop(s, version):
+tests/features/shlex_join_test.py:38:            'shlex.join(cmd)\n',
+tests/features/shlex_join_test.py:47:            'shlex.join(cmd)\n',
+tests/features/shlex_join_test.py:56:            'shlex.join(cmd)\n',
+tests/features/shlex_join_test.py:65:            'shlex.join(["a", "b", "c"])\n',
+tests/features/shlex_join_test.py:71:def test_shlex_join_fixes(s, expected):
+.git/COMMIT_EDITMSG:1:Only replace str.join(shlex.quote(...)) with shlex.join when separator is single space
+.git/logs/refs/heads/main:3:3e4103f24bfd10701d1913f7cc969b44fe165525 58d62de0b4f11f88820bf111fdb6d5d692de1cbe test <test@example.com> 1785850953 +0000	commit: Only replace str.join(shlex.quote(...)) with shlex.join when separator is single space
+.git/logs/HEAD:3:3e4103f24bfd10701d1913f7cc969b44fe165525 58d62de0b4f11f88820bf111fdb6d5d692de1cbe test <test@example.com> 1785850953 +0000	commit: Only replace str.join(shlex.quote(...)) with shlex.join when separator is single space
+.pytest_cache/v/cache/nodeids:556:  "tests/features/shlex_join_test.py::test_shlex_join_fixes[generator expression]",
+.pytest_cache/v/cache/nodeids:557:  "tests/features/shlex_join_test.py::test_shlex_join_fixes[list comprehension]",
+.pytest_cache/v/cache/nodeids:558:  "tests/features/shlex_join_test.py::test_shlex_join_fixes[more complicated iterable]",
+.pytest_cache/v/cache/nodeids:559:  "tests/features/shlex_join_test.py::test_shlex_join_fixes[removes trailing comma]",
+.pytest_cache/v/cache/nodeids:560:  "tests/features/shlex_join_test.py::test_shlex_join_noop[3.8+ feature]",
+.pytest_cache/v/cache/nodeids:561:  "tests/features/shlex_join_test.py::test_shlex_join_noop[quote from-imported]",
+pyupgrade/_plugins/shlex_join.py:20:def _fix_shlex_join(i: int, tokens: list[Token], *, arg: ast.expr) -> None:
+pyupgrade/_plugins/shlex_join.py:27:    tokens[i:k] = [Token('CODE', 'shlex.join'), Token('OP', '(')]
+pyupgrade/_plugins/shlex_join.py:62:        func = functools.partial(_fix_shlex_join, arg=node.args[0])
+README.md:699:### shlex.join
+README.md:706:+shlex.join(cmd)
+--- stderr ---
+grep: tests/features/__pycache__/shlex_join_test.cpython-312-pytest-9.1.1.pyc: binary file matches
+grep: .git/index: binary file matches
+grep: pyupgrade/_plugins/__pycache__/shlex_join.cpython-312.pyc: binary file matches
+
+=== [5] 2026-08-04T13:49:30.196119+00:00 read_file ===
+arguments:
+{
+  "path": "pyupgrade/_plugins/shlex_join.py"
+}
+result:
+from __future__ import annotations
+
+import ast
+import functools
+from typing import Iterable
+
+from tokenize_rt import NON_CODING_TOKENS
+from tokenize_rt import Offset
+from tokenize_rt import Token
+
+from pyupgrade._ast_helpers import ast_to_offset
+from pyupgrade._data import register
+from pyupgrade._data import State
+from pyupgrade._data import TokenFunc
+from pyupgrade._token_helpers import find_name
+from pyupgrade._token_helpers import find_op
+from pyupgrade._token_helpers import victims
+
+
+def _fix_shlex_join(i: int, tokens: list[Token], *, arg: ast.expr) -> None:
+    j = find_op(tokens, i, '(')
+    comp_victims = victims(tokens, j, arg, gen=True)
+    k = find_name(tokens, comp_victims.arg_index, 'in') + 1
+    while tokens[k].name in NON_CODING_TOKENS:
+        k += 1
+    tokens[comp_victims.ends[0]:comp_victims.ends[-1] + 1] = [Token('OP', ')')]
+    tokens[i:k] = [Token('CODE', 'shlex.join'), Token('OP', '(')]
+
+
+@register(ast.Call)
+def visit_Call(
+        state: State,
+        node: ast.Call,
+        parent: ast.AST,
+) -> Iterable[tuple[Offset, TokenFunc]]:
+    if state.settings.min_version < (3, 8):
+        return
+
+    if (
+            isinstance(node.func, ast.Attribute) and
+            isinstance(node.func.value, ast.Constant) and
+            isinstance(node.func.value.value, str) and
+            node.func.value.value == ' ' and
+            node.func.attr == 'join' and
+            not node.keywords and
+            len(node.args) == 1 and
+            isinstance(node.args[0], (ast.ListComp, ast.GeneratorExp)) and
+            isinstance(node.args[0].elt, ast.Call) and
+            isinstance(node.args[0].elt.func, ast.Attribute) and
+            isinstance(node.args[0].elt.func.value, ast.Name) and
+            node.args[0].elt.func.value.id == 'shlex' and
+            node.args[0].elt.func.attr == 'quote' and
+            not node.args[0].elt.keywords and
+            len(node.args[0].elt.args) == 1 and
+            isinstance(node.args[0].elt.args[0], ast.Name) and
+            len(node.args[0].generators) == 1 and
+            isinstance(node.args[0].generators[0].target, ast.Name) and
+            not node.args[0].generators[0].ifs and
+            not node.args[0].generators[0].is_async and
+            node.args[0].elt.args[0].id == node.args[0].generators[0].target.id
+    ):
+        func = functools.partial(_fix_shlex_join, arg=node.args[0])
+        yield ast_to_offset(node), func
+
+
+=== [6] 2026-08-04T13:49:36.701260+00:00 read_file ===
+arguments:
+{
+  "path": "tests/features/shlex_join_test.py"
+}
+result:
+from __future__ import annotations
+
+import pytest
+
+from pyupgrade._data import Settings
+from pyupgrade._main import _fix_plugins
+
+
+@pytest.mark.parametrize(
+    ('s', 'version'),
+    (
+        pytest.param(
+            'from shlex import quote\n'
+            '" ".join(quote(arg) for arg in cmd)\n',
+            (3, 8),
+            id='quote from-imported',
+        ),
+        pytest.param(
+            'import shlex\n'
+            '" ".join(shlex.quote(arg) for arg in cmd)\n',
+            (3, 7),
+            id='3.8+ feature',
+        ),
+    ),
+)
+def test_shlex_join_noop(s, version):
+    assert _fix_plugins(s, settings=Settings(min_version=version)) == s
+
+
+@pytest.mark.parametrize(
+    ('s', 'expected'),
+    (
+        pytest.param(
+            'import shlex\n'
+            '" ".join(shlex.quote(arg) for arg in cmd)\n',
+
+            'import shlex\n'
+            'shlex.join(cmd)\n',
+
+            id='generator expression',
+        ),
+        pytest.param(
+            'import shlex\n'
+            '" ".join([shlex.quote(arg) for arg in cmd])\n',
+
+            'import shlex\n'
+            'shlex.join(cmd)\n',
+
+            id='list comprehension',
+        ),
+        pytest.param(
+            'import shlex\n'
+            '" ".join([shlex.quote(arg) for arg in cmd],)\n',
+
+            'import shlex\n'
+            'shlex.join(cmd)\n',
+
+            id='removes trailing comma',
+        ),
+        pytest.param(
+            'import shlex\n'
+            '" ".join([shlex.quote(arg) for arg in ["a", "b", "c"]],)\n',
+
+            'import shlex\n'
+            'shlex.join(["a", "b", "c"])\n',
+
+            id='more complicated iterable',
+        ),
+    ),
+)
+def test_shlex_join_fixes(s, expected):
+    assert _fix_plugins(s, settings=Settings(min_version=(3, 8))) == expected
+
+
+=== [7] 2026-08-04T13:49:38.933074+00:00 run_bash ===
+arguments:
+{
+  "command": "sed -n '1,240p' pyupgrade/_plugins/shlex_join.py",
+  "cwd": "/home/vagrant/testbeds/CLI_Tools_Easy"
+}
+result:
+exit_code=0
+--- stdout ---
+from __future__ import annotations
+
+import ast
+import functools
+from typing import Iterable
+
+from tokenize_rt import NON_CODING_TOKENS
+from tokenize_rt import Offset
+from tokenize_rt import Token
+
+from pyupgrade._ast_helpers import ast_to_offset
+from pyupgrade._data import register
+from pyupgrade._data import State
+from pyupgrade._data import TokenFunc
+from pyupgrade._token_helpers import find_name
+from pyupgrade._token_helpers import find_op
+from pyupgrade._token_helpers import victims
+
+
+def _fix_shlex_join(i: int, tokens: list[Token], *, arg: ast.expr) -> None:
+    j = find_op(tokens, i, '(')
+    comp_victims = victims(tokens, j, arg, gen=True)
+    k = find_name(tokens, comp_victims.arg_index, 'in') + 1
+    while tokens[k].name in NON_CODING_TOKENS:
+        k += 1
+    tokens[comp_victims.ends[0]:comp_victims.ends[-1] + 1] = [Token('OP', ')')]
+    tokens[i:k] = [Token('CODE', 'shlex.join'), Token('OP', '(')]
+
+
+@register(ast.Call)
+def visit_Call(
+        state: State,
+        node: ast.Call,
+        parent: ast.AST,
+) -> Iterable[tuple[Offset, TokenFunc]]:
+    if state.settings.min_version < (3, 8):
+        return
+
+    if (
+            isinstance(node.func, ast.Attribute) and
+            isinstance(node.func.value, ast.Constant) and
+            isinstance(node.func.value.value, str) and
+            node.func.value.value == ' ' and
+            node.func.attr == 'join' and
+            not node.keywords and
+            len(node.args) == 1 and
+            isinstance(node.args[0], (ast.ListComp, ast.GeneratorExp)) and
+            isinstance(node.args[0].elt, ast.Call) and
+            isinstance(node.args[0].elt.func, ast.Attribute) and
+            isinstance(node.args[0].elt.func.value, ast.Name) and
+            node.args[0].elt.func.value.id == 'shlex' and
+            node.args[0].elt.func.attr == 'quote' and
+            not node.args[0].elt.keywords and
+            len(node.args[0].elt.args) == 1 and
+            isinstance(node.args[0].elt.args[0], ast.Name) and
+            len(node.args[0].generators) == 1 and
+            isinstance(node.args[0].generators[0].target, ast.Name) and
+            not node.args[0].generators[0].ifs and
+            not node.args[0].generators[0].is_async and
+            node.args[0].elt.args[0].id == node.args[0].generators[0].target.id
+    ):
+        func = functools.partial(_fix_shlex_join, arg=node.args[0])
+        yield ast_to_offset(node), func
+--- stderr ---
+(empty)
+
+=== [8] 2026-08-04T13:49:47.758181+00:00 read_file ===
+arguments:
+{
+  "path": "tests/features/shlex_join_test.py"
+}
+result:
+from __future__ import annotations
+
+import pytest
+
+from pyupgrade._data import Settings
+from pyupgrade._main import _fix_plugins
+
+
+@pytest.mark.parametrize(
+    ('s', 'version'),
+    (
+        pytest.param(
+            'from shlex import quote\n'
+            '" ".join(quote(arg) for arg in cmd)\n',
+            (3, 8),
+            id='quote from-imported',
+        ),
+        pytest.param(
+            'import shlex\n'
+            '" ".join(shlex.quote(arg) for arg in cmd)\n',
+            (3, 7),
+            id='3.8+ feature',
+        ),
+    ),
+)
+def test_shlex_join_noop(s, version):
+    assert _fix_plugins(s, settings=Settings(min_version=version)) == s
+
+
+@pytest.mark.parametrize(
+    ('s', 'expected'),
+    (
+        pytest.param(
+            'import shlex\n'
+            '" ".join(shlex.quote(arg) for arg in cmd)\n',
+
+            'import shlex\n'
+            'shlex.join(cmd)\n',
+
+            id='generator expression',
+        ),
+        pytest.param(
+            'import shlex\n'
+            '" ".join([shlex.quote(arg) for arg in cmd])\n',
+
+            'import shlex\n'
+            'shlex.join(cmd)\n',
+
+            id='list comprehension',
+        ),
+        pytest.param(
+            'import shlex\n'
+            '" ".join([shlex.quote(arg) for arg in cmd],)\n',
+
+            'import shlex\n'
+            'shlex.join(cmd)\n',
+
+            id='removes trailing comma',
+        ),
+        pytest.param(
+            'import shlex\n'
+            '" ".join([shlex.quote(arg) for arg in ["a", "b", "c"]],)\n',
+
+            'import shlex\n'
+            'shlex.join(["a", "b", "c"])\n',
+
+            id='more complicated iterable',
+        ),
+    ),
+)
+def test_shlex_join_fixes(s, expected):
+    assert _fix_plugins(s, settings=Settings(min_version=(3, 8))) == expected
+
+
+=== [9] 2026-08-04T13:49:57.416903+00:00 write_file ===
+arguments:
+{
+  "path": "tests/features/shlex_join_test.py",
+  "content": "from __future__ import annotations\n\nimport pytest\n\nfrom pyupgrade._data import Settings\nfrom pyupgrade._main import _fix_plugins\n\n\n@pytest.mark.parametrize(\n    ('s', 'version'),\n    (\n        pytest.param(\n            'from shlex import quote\\n'\n            '\" \".join(quote(arg) for arg in cmd)\\n',\n            (3, 8),\n            id='quote from-imported',\n        ),\n        pytest.param(\n            'import shlex\\n'\n            '\" \".join(shlex.quote(arg) for arg in cmd)\\n',\n            (3, 7),\n            id='3.8+ feature',\n        ),\n        pytest.param(\n            'import shlex\\n'\n            '\"\".join(shlex.quote(a) for a in [\"some\", \"quotable strings\"])\\n',\n            (3, 8),\n            id='empty string separator should noop',\n        ),\n        pytest.param(\n            'import shlex\\n'\n            '\", \".join(shlex.quote(arg) for arg in cmd)\\n',\n            (3, 8),\n            id='comma space separator should noop',\n        ),\n    ),\n)\ndef test_shlex_join_noop(s, version):\n    assert _fix_plugins(s, settings=Settings(min_version=version)) == s\n\n\n@pytest.mark.parametrize(\n    ('s', 'expected'),\n    (\n        pytest.param(\n            'import shlex\\n'\n            '\" \".join(shlex.quote(arg) for arg in cmd)\\n',\n\n            'import shlex\\n'\n            'shlex.join(cmd)\\n',\n\n            id='generator expression',\n        ),\n        pytest.param(\n            'import shlex\\n'\n            '\" \".join([shlex.quote(arg) for arg in cmd])\\n',\n\n            'import shlex\\n'\n            'shlex.join(cmd)\\n',\n\n            id='list comprehension',\n        ),\n        pytest.param(\n            'import shlex\\n'\n            '\" \".join([shlex.quote(arg) for arg in cmd],)\\n',\n\n            'import shlex\\n'\n            'shlex.join(cmd)\\n',\n\n            id='removes trailing comma',\n        ),\n        pytest.param(\n            'import shlex\\n'\n            '\" \".join([shlex.quote(arg) for arg in [\"a\", \"b\", \"c\"]],)\\n',\n\n            'import shlex\\n'\n            'shlex.join([\"a\", \"b\", \"c\"])\\n',\n\n            id='more complicated iterable',\n        ),\n    ),\n)\ndef test_shlex_join_fixes(s, expected):\n    assert _fix_plugins(s, settings=Settings(min_version=(3, 8))) == expected\n",
+  "content_chars": 2185
+}
+result:
+Wrote 2185 chars to tests/features/shlex_join_test.py
+
+=== [10] 2026-08-04T13:50:05.413675+00:00 run_bash ===
+arguments:
+{
+  "command": "pytest tests/features/shlex_join_test.py -q",
+  "cwd": "/home/vagrant/testbeds/CLI_Tools_Easy"
+}
+result:
+exit_code=0
+--- stdout ---
+........                                                                 [100%]
+8 passed in 0.07s
+--- stderr ---
+(empty)
+
+=== [11] 2026-08-04T13:50:08.532340+00:00 run_bash ===
+arguments:
+{
+  "command": "pytest -q",
+  "cwd": "/home/vagrant/testbeds/CLI_Tools_Easy"
+}
+result:
+exit_code=0
+--- stdout ---
+........................................................................ [  7%]
+........................................................................ [ 14%]
+........................................................................ [ 21%]
+........................................................................ [ 29%]
+........................................................................ [ 36%]
+........................................................................ [ 43%]
+........................................................................ [ 51%]
+................xxxx.................................................... [ 58%]
+........................................................................ [ 65%]
+........................................................................ [ 73%]
+........................................................................ [ 80%]
+........................................................................ [ 87%]
+........................................................................ [ 95%]
+..............................................                           [100%]
+978 passed, 4 xfailed in 1.53s
+--- stderr ---
+(empty)
+
+=== [12] 2026-08-04T13:50:10.454884+00:00 run_bash ===
+arguments:
+{
+  "command": "git add -A && git commit -m \"tests: ensure shlex.join replacement only for single-space separator\" || true; git --no-pager diff --staged",
+  "cwd": "/home/vagrant/testbeds/CLI_Tools_Easy"
+}
+result:
+exit_code=0
+--- stdout ---
+[main 73106ed] tests: ensure shlex.join replacement only for single-space separator
+ 1 file changed, 12 insertions(+)
+--- stderr ---
+(empty)
+
+=== [13] 2026-08-04T13:50:12.618098+00:00 run_bash ===
+arguments:
+{
+  "command": "git --no-pager show --name-only --pretty=\"\" HEAD",
+  "cwd": "/home/vagrant/testbeds/CLI_Tools_Easy"
+}
+result:
+exit_code=0
+--- stdout ---
+tests/features/shlex_join_test.py
+--- stderr ---
+(empty)
+
