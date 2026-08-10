@@ -10,7 +10,7 @@
 //!   the directory before creating the sandbox; the guest can only read.
 //!
 //! * **Output** — default temp directory or host-provided with explicit
-//!   permissions, exposed as a writable WASI preopen.  Wiped clean after
+//!   permissions, exposed as a writable WASI preopen.  Wiped clean before
 //!   each run.
 //!
 //! Snapshots only capture runtime state — input is immutable and output is
@@ -123,6 +123,52 @@ pub struct DescriptorFlags {
     pub read: bool,
     pub write: bool,
     pub mutate_directory: bool,
+}
+
+/// Resource limits enforced by [`CapFs`].
+///
+/// Live descriptor and stream limits apply for the lifetime of the sandbox.
+/// Byte, creation, and directory-entry budgets apply to one `run()` and are
+/// reset by [`CapFs::prepare_for_run`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FilesystemLimits {
+    /// Maximum number of live descriptors, including preopens.
+    pub max_open_descriptors: usize,
+    /// Maximum number of live file and directory streams combined.
+    pub max_open_streams: usize,
+    /// Maximum allocation made by one filesystem read.
+    pub max_single_read_bytes: u64,
+    /// Maximum number of bytes returned by filesystem reads in one run.
+    pub max_read_bytes_per_run: u64,
+    /// Maximum number of bytes accepted by filesystem writes in one run.
+    pub max_written_bytes_per_run: u64,
+    /// Maximum number of files and directories created in one run.
+    pub max_creations_per_run: u64,
+    /// Maximum entries materialized by one directory listing.
+    pub max_directory_entries_per_listing: usize,
+    /// Maximum entries materialized across directory listings in one run.
+    pub max_directory_entries_per_run: u64,
+    /// Maximum entries inspected while recursively cleaning one mount.
+    pub max_cleanup_entries: u64,
+    /// Maximum directory depth traversed by recursive cleanup.
+    pub max_recursive_depth: usize,
+}
+
+impl Default for FilesystemLimits {
+    fn default() -> Self {
+        Self {
+            max_open_descriptors: 1_024,
+            max_open_streams: 1_024,
+            max_single_read_bytes: 16 * 1024 * 1024,
+            max_read_bytes_per_run: 256 * 1024 * 1024,
+            max_written_bytes_per_run: 64 * 1024 * 1024,
+            max_creations_per_run: 10_000,
+            max_directory_entries_per_listing: 10_000,
+            max_directory_entries_per_run: 100_000,
+            max_cleanup_entries: 100_000,
+            max_recursive_depth: 64,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -352,6 +398,20 @@ struct DirStreamState {
     cursor: usize,
 }
 
+/// Counters that are reset before each guest invocation.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RunBudget {
+    bytes_read: u64,
+    bytes_written: u64,
+    creations: u64,
+    directory_entries: u64,
+}
+
+#[derive(Debug, Default)]
+struct CleanupBudget {
+    entries: u64,
+}
+
 // ---------------------------------------------------------------------------
 // CapFs
 // ---------------------------------------------------------------------------
@@ -377,6 +437,8 @@ pub struct CapFs {
     streams: HashMap<u32, StreamState>,
     dir_streams: HashMap<u32, DirStreamState>,
     next_handle: u32,
+    limits: FilesystemLimits,
+    run_budget: RunBudget,
 
     // Host filesystem path to the output directory.
     output_path: Option<PathBuf>,
@@ -403,9 +465,24 @@ impl CapFs {
             streams: HashMap::new(),
             dir_streams: HashMap::new(),
             next_handle: FIRST_PREOPEN_FD,
+            limits: FilesystemLimits::default(),
+            run_budget: RunBudget::default(),
             output_path: None,
             _output_tmp: None,
         }
+    }
+
+    /// Replace the filesystem limits used by this sandbox.
+    ///
+    /// Existing resources are not evicted when a limit is lowered. New
+    /// operations fail with [`FsError::Quota`] until usage is below the limit.
+    pub fn with_limits(mut self, limits: FilesystemLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    pub fn limits(&self) -> &FilesystemLimits {
+        &self.limits
     }
 
     /// Add a read-only input directory preopen (`/input`).
@@ -480,15 +557,28 @@ impl CapFs {
         let output_fd = self
             .output_fd
             .ok_or_else(|| anyhow::anyhow!("no output directory configured"))?;
-        let output = &self.preopen_dirs[&output_fd];
-        if !output.dir.perms().contains(DirPerms::MUTATE) {
+        let output = self.preopen_dirs[&output_fd].dir.clone();
+        if !output.perms().contains(DirPerms::MUTATE) {
             anyhow::bail!("write permission denied on output directory");
         }
-        if !output.dir.file_perms().contains(FilePerms::WRITE) {
+        if !output.file_perms().contains(FilePerms::WRITE) {
             anyhow::bail!("write permission denied on output files");
         }
+        let creates_file = match output.cap_std().symlink_metadata(key.as_path()) {
+            Ok(_) => false,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to stat output file: {path}"));
+            }
+        };
+        if creates_file {
+            self.charge_creation().map_err(|error| {
+                anyhow::anyhow!("filesystem creation quota exceeded: {error:?}")
+            })?;
+        }
+        self.charge_written_bytes(data.len() as u64)
+            .map_err(|error| anyhow::anyhow!("filesystem write quota exceeded: {error:?}"))?;
         let mut file = output
-            .dir
             .cap_std()
             .create(key.as_path())
             .with_context(|| format!("failed to create output file: {path}"))?;
@@ -497,11 +587,8 @@ impl CapFs {
         Ok(())
     }
 
-    /// Maximum size (in bytes) for a single file read into memory.
-    const MAX_FILE_READ_BYTES: u64 = 64 * 1024 * 1024; // 64 MiB
-
     /// Read a file from a preopened directory by guest path (e.g. "/input/data.txt").
-    pub fn read_guest_file(&self, guest_path: &str) -> Result<Vec<u8>> {
+    pub fn read_guest_file(&mut self, guest_path: &str) -> Result<Vec<u8>> {
         // Determine which preopen and validated relative path from the path.
         let without_leading = guest_path
             .strip_prefix('/')
@@ -517,6 +604,7 @@ impl CapFs {
         let preopen_path = format!("/{dir_name}");
         let dir = self
             .dir_by_guest_path(&preopen_path)
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("no preopen for {preopen_path}"))?;
         if !dir.perms().contains(DirPerms::READ) {
             anyhow::bail!("read permission denied on {preopen_path}");
@@ -531,15 +619,21 @@ impl CapFs {
         let metadata = file
             .metadata()
             .with_context(|| format!("failed to stat: {guest_path}"))?;
-        if metadata.len() > Self::MAX_FILE_READ_BYTES {
+        let single_read_limit = self.limits.max_single_read_bytes.min(usize::MAX as u64);
+        if metadata.len() > single_read_limit {
             anyhow::bail!(
                 "file too large ({} bytes, max {} bytes): {guest_path}",
                 metadata.len(),
-                Self::MAX_FILE_READ_BYTES,
+                single_read_limit,
             );
         }
+        self.charge_read_bytes(metadata.len())
+            .map_err(|error| anyhow::anyhow!("filesystem read quota exceeded: {error:?}"))?;
         let mut data = Vec::new();
-        file.take(Self::MAX_FILE_READ_BYTES)
+        // Bound the actual read to the size that was charged. If a host
+        // process grows the file concurrently, the extra bytes belong to a
+        // later read/run rather than bypassing the per-run byte budget.
+        file.take(metadata.len())
             .read_to_end(&mut data)
             .with_context(|| format!("failed to read: {guest_path}"))?;
         Ok(data)
@@ -584,35 +678,62 @@ impl CapFs {
         result
     }
 
-    /// Wipe output files and reset all handles/streams. Input is untouched.
-    pub fn clear_output_files(&mut self) {
+    /// Recursively clear the ephemeral output mount.
+    ///
+    /// The preopen root is preserved. Nested directories, regular files, and
+    /// symlinks are removed without following directory symlinks. Failures are
+    /// returned so callers never execute a new run against dirty output state.
+    pub fn clear_output_files(&mut self) -> Result<(), FsError> {
         let Some(output_fd) = self.output_fd else {
-            return;
+            return Ok(());
         };
-        if let Some(output) = self.preopen_dirs.get(&output_fd) {
-            let dir = output.dir.cap_std();
-            if let Ok(entries) = dir.entries() {
-                for entry in entries.flatten() {
-                    let _ = dir.remove_file(entry.file_name());
-                }
-            }
+        self.clear_mount(output_fd)
+    }
+
+    /// Recursively clear an ephemeral mount while preserving its preopen root.
+    ///
+    /// At present only `/output` is ephemeral. `/input` and any other
+    /// persistent preopen are rejected even if they grant mutation rights.
+    pub fn clear_mount(&mut self, mount_fd: u32) -> Result<(), FsError> {
+        if self.output_fd != Some(mount_fd) {
+            return Err(FsError::NotPermitted);
         }
-        self.descriptors
-            .retain(|_, e| e.root_fd != output_fd || e.is_preopen);
-        self.streams.clear();
-        self.dir_streams.clear();
-        self.next_handle = self
+        let root = self
+            .preopen_dirs
+            .get(&mount_fd)
+            .map(|entry| entry.dir.clone())
+            .ok_or(FsError::BadDescriptor)?;
+
+        let mut cleanup_budget = CleanupBudget::default();
+        let cleanup_result =
+            Self::clear_directory_recursive(root.cap_std(), 0, &self.limits, &mut cleanup_budget);
+
+        // Cleanup may have partially changed the namespace before an I/O or
+        // bound failure. Invalidate every path-backed handle under the mount
+        // in either case so none can silently retarget a different object.
+        let invalidated = self
             .descriptors
-            .keys()
-            .copied()
-            .max()
-            .map(|h| h + 1)
-            .unwrap_or(FIRST_PREOPEN_FD);
+            .iter()
+            .filter_map(|(&fd, entry)| {
+                (!entry.is_preopen && entry.root_fd == mount_fd).then_some(fd)
+            })
+            .collect::<HashSet<_>>();
+        self.invalidate_descriptors(&invalidated);
+        self.recalculate_next_handle()?;
+
+        cleanup_result
+    }
+
+    /// Establish clean ephemeral state and reset per-run quota accounting.
+    pub fn prepare_for_run(&mut self) -> Result<(), FsError> {
+        self.clear_output_files()?;
+        self.run_budget = RunBudget::default();
+        Ok(())
     }
 
     /// Clear output directory. Input is host-managed and left untouched.
-    pub fn clear(&mut self) {
-        self.clear_output_files();
+    pub fn clear(&mut self) -> Result<(), FsError> {
+        self.clear_output_files()
     }
 
     // -----------------------------------------------------------------------
@@ -789,12 +910,6 @@ impl CapFs {
     // File operations (cap-std backed)
     // -----------------------------------------------------------------------
 
-    /// Maximum number of open descendant descriptors.
-    const MAX_OPEN_DESCRIPTORS: usize = 1024;
-
-    /// Cap single read allocation to prevent guest-triggered OOM.
-    const MAX_READ_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
-
     pub fn open_at(&mut self, dir_fd: u32, path: &str, flags: OpenFlags) -> Result<u32, FsError> {
         self.open_at_with_path_flags(dir_fd, path, PathFlags::SYMLINK_FOLLOW, flags)
     }
@@ -851,16 +966,11 @@ impl CapFs {
         if truncate && metadata.as_ref().is_some_and(|meta| meta.is_dir()) {
             return Err(FsError::InvalidPath);
         }
-        if self
-            .descriptors
-            .values()
-            .filter(|entry| !entry.is_preopen)
-            .count()
-            >= Self::MAX_OPEN_DESCRIPTORS
-        {
-            return Err(FsError::Io("too many open descriptors".into()));
-        }
+        self.ensure_descriptor_capacity()?;
         if !exists || truncate {
+            if !exists {
+                self.charge_creation()?;
+            }
             dir.cap_std()
                 .create(dir_relative)
                 .map_err(FsError::from_io)?;
@@ -912,6 +1022,7 @@ impl CapFs {
     pub fn create_directory_at(&mut self, dir_fd: u32, path: &str) -> Result<(), FsError> {
         let resolved = self.resolve_at(dir_fd, path)?;
         let dir = self.mutating_dir(dir_fd)?;
+        self.charge_creation()?;
         dir.cap_std()
             .create_dir(resolved.dir_relative.as_path())
             .map_err(FsError::from_io)
@@ -1065,20 +1176,32 @@ impl CapFs {
         self.dir_streams.remove(&stream_id);
     }
 
-    pub fn read_file(&self, fd: u32, offset: u64, len: u64) -> Result<(Vec<u8>, bool), FsError> {
-        let (root, path) = self.file_parts(fd)?;
+    pub fn read_file(
+        &mut self,
+        fd: u32,
+        offset: u64,
+        len: u64,
+    ) -> Result<(Vec<u8>, bool), FsError> {
+        let (root, path) = {
+            let (root, path) = self.file_parts(fd)?;
+            (root.clone(), path.to_path_buf())
+        };
         if !root.file_perms().contains(FilePerms::READ) {
             return Err(FsError::NotPermitted);
         }
-        let mut file = root.cap_std().open(path).map_err(FsError::from_io)?;
+        let mut file = root.cap_std().open(&path).map_err(FsError::from_io)?;
         let file_size = file.metadata().map_err(FsError::from_io)?.len();
 
         let start = offset.min(file_size);
         let remaining = file_size - start;
-        let to_read = len.min(remaining).min(Self::MAX_READ_BYTES as u64) as usize;
+        let to_read = len
+            .min(remaining)
+            .min(self.limits.max_single_read_bytes)
+            .min(usize::MAX as u64) as usize;
         if to_read == 0 {
             return Ok((Vec::new(), true));
         }
+        self.charge_read_bytes(to_read as u64)?;
         file.seek(SeekFrom::Start(start))
             .map_err(FsError::from_io)?;
         let mut buf = vec![0u8; to_read];
@@ -1089,15 +1212,19 @@ impl CapFs {
     }
 
     pub fn write_file(&mut self, fd: u32, offset: u64, buffer: &[u8]) -> Result<u64, FsError> {
-        let (root, path) = self.file_parts(fd)?;
+        let (root, path) = {
+            let (root, path) = self.file_parts(fd)?;
+            (root.clone(), path.to_path_buf())
+        };
         if !root.file_perms().contains(FilePerms::WRITE) {
             return Err(FsError::NotPermitted);
         }
+        self.charge_written_bytes(buffer.len() as u64)?;
         let mut opts = cap_std::fs::OpenOptions::new();
         opts.read(true).write(true);
         let mut file = root
             .cap_std()
-            .open_with(path, &opts)
+            .open_with(&path, &opts)
             .map_err(FsError::from_io)?;
 
         let file_size = file.metadata().map_err(FsError::from_io)?.len();
@@ -1124,6 +1251,7 @@ impl CapFs {
         if !self.file_has_perms(file_fd, FilePerms::READ) {
             return Err(FsError::NotPermitted);
         }
+        self.ensure_stream_capacity()?;
         let id = self.alloc_handle()?;
         self.streams.insert(
             id,
@@ -1143,6 +1271,7 @@ impl CapFs {
         if !self.file_has_perms(file_fd, FilePerms::WRITE) {
             return Err(FsError::NotPermitted);
         }
+        self.ensure_stream_capacity()?;
         let id = self.alloc_handle()?;
         self.streams.insert(
             id,
@@ -1165,8 +1294,11 @@ impl CapFs {
         let file_fd = stream.file_fd;
         let offset = stream.offset;
 
-        let (root, path) = self.file_parts(file_fd)?;
-        let mut file = root.cap_std().open(path).map_err(FsError::from_io)?;
+        let (root, path) = {
+            let (root, path) = self.file_parts(file_fd)?;
+            (root.clone(), path.to_path_buf())
+        };
+        let mut file = root.cap_std().open(&path).map_err(FsError::from_io)?;
         let file_size = file.metadata().map_err(FsError::from_io)?.len();
         if offset >= file_size {
             return Err(FsError::Io("stream read past end of file".into()));
@@ -1174,7 +1306,11 @@ impl CapFs {
         file.seek(SeekFrom::Start(offset))
             .map_err(FsError::from_io)?;
         let remaining = file_size - offset;
-        let to_read = len.min(remaining).min(Self::MAX_READ_BYTES as u64) as usize;
+        let to_read = len
+            .min(remaining)
+            .min(self.limits.max_single_read_bytes)
+            .min(usize::MAX as u64) as usize;
+        self.charge_read_bytes(to_read as u64)?;
         let mut buf = vec![0u8; to_read];
         let n = file.read(&mut buf).map_err(FsError::from_io)?;
         buf.truncate(n);
@@ -1214,24 +1350,26 @@ impl CapFs {
     // Directory streams
     // -----------------------------------------------------------------------
 
-    /// Maximum number of entries materialized from a single directory listing.
-    const MAX_DIR_ENTRIES: usize = 10_000;
-
     pub fn create_dir_stream(&mut self, dir_fd: u32) -> Result<u32, FsError> {
-        let dir = self.get_dir(dir_fd).ok_or(FsError::BadDescriptor)?;
+        let dir = self
+            .get_dir(dir_fd)
+            .cloned()
+            .ok_or(FsError::BadDescriptor)?;
         if !dir.perms().contains(DirPerms::READ) {
             return Err(FsError::NotPermitted);
         }
+        self.ensure_stream_capacity()?;
         let mut file_entries = Vec::new();
-        if let Ok(entries) = dir.cap_std().entries() {
-            for entry in entries.flatten() {
-                if file_entries.len() >= Self::MAX_DIR_ENTRIES {
-                    return Err(FsError::Io("directory listing exceeds entry limit".into()));
-                }
-                let name = entry.file_name().to_string_lossy().to_string();
-                let is_dir = entry.file_type().is_ok_and(|ft| ft.is_dir());
-                file_entries.push((name, is_dir));
+        let entries = dir.cap_std().entries().map_err(FsError::from_io)?;
+        for entry in entries {
+            let entry = entry.map_err(FsError::from_io)?;
+            if file_entries.len() >= self.limits.max_directory_entries_per_listing {
+                return Err(FsError::Quota);
             }
+            self.charge_directory_entries(1)?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            let is_dir = entry.file_type().map_err(FsError::from_io)?.is_dir();
+            file_entries.push((name, is_dir));
         }
         let id = self.alloc_handle()?;
         self.dir_streams.insert(
@@ -1271,6 +1409,124 @@ impl CapFs {
     // Internals
     // -----------------------------------------------------------------------
 
+    fn checked_charge(current: &mut u64, amount: u64, maximum: u64) -> Result<(), FsError> {
+        let updated = current.checked_add(amount).ok_or(FsError::Quota)?;
+        if updated > maximum {
+            return Err(FsError::Quota);
+        }
+        *current = updated;
+        Ok(())
+    }
+
+    fn charge_read_bytes(&mut self, amount: u64) -> Result<(), FsError> {
+        Self::checked_charge(
+            &mut self.run_budget.bytes_read,
+            amount,
+            self.limits.max_read_bytes_per_run,
+        )
+    }
+
+    fn charge_written_bytes(&mut self, amount: u64) -> Result<(), FsError> {
+        Self::checked_charge(
+            &mut self.run_budget.bytes_written,
+            amount,
+            self.limits.max_written_bytes_per_run,
+        )
+    }
+
+    fn charge_creation(&mut self) -> Result<(), FsError> {
+        Self::checked_charge(
+            &mut self.run_budget.creations,
+            1,
+            self.limits.max_creations_per_run,
+        )
+    }
+
+    fn charge_directory_entries(&mut self, amount: u64) -> Result<(), FsError> {
+        Self::checked_charge(
+            &mut self.run_budget.directory_entries,
+            amount,
+            self.limits.max_directory_entries_per_run,
+        )
+    }
+
+    fn ensure_descriptor_capacity(&self) -> Result<(), FsError> {
+        if self.descriptors.len() >= self.limits.max_open_descriptors {
+            return Err(FsError::Quota);
+        }
+        Ok(())
+    }
+
+    fn ensure_stream_capacity(&self) -> Result<(), FsError> {
+        let live_streams = self
+            .streams
+            .len()
+            .checked_add(self.dir_streams.len())
+            .ok_or(FsError::Quota)?;
+        if live_streams >= self.limits.max_open_streams {
+            return Err(FsError::Quota);
+        }
+        Ok(())
+    }
+
+    fn clear_directory_recursive(
+        dir: &CapDir,
+        depth: usize,
+        limits: &FilesystemLimits,
+        budget: &mut CleanupBudget,
+    ) -> Result<(), FsError> {
+        // Materialize names, not handles, so the directory iterator is closed
+        // before entries are removed (required by some host filesystems).
+        let mut names = Vec::new();
+        let entries = dir.entries().map_err(FsError::from_io)?;
+        for entry in entries {
+            let entry = entry.map_err(FsError::from_io)?;
+            budget.entries = budget.entries.checked_add(1).ok_or(FsError::Quota)?;
+            if budget.entries > limits.max_cleanup_entries {
+                return Err(FsError::Quota);
+            }
+            names.push(entry.file_name());
+        }
+
+        for name in names {
+            let metadata = match dir.symlink_metadata(&name) {
+                Ok(metadata) => metadata,
+                // A concurrent host cleanup may already have removed it.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(FsError::from_io(error)),
+            };
+
+            if metadata.is_dir() {
+                if depth >= limits.max_recursive_depth {
+                    return Err(FsError::Quota);
+                }
+                let child = dir.open_dir(&name).map_err(FsError::from_io)?;
+                Self::clear_directory_recursive(&child, depth + 1, limits, budget)?;
+                dir.remove_dir(&name).map_err(FsError::from_io)?;
+            } else {
+                // `symlink_metadata` does not follow the final component, so
+                // directory symlinks are unlinked here rather than traversed.
+                dir.remove_file(&name).map_err(FsError::from_io)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn recalculate_next_handle(&mut self) -> Result<(), FsError> {
+        let maximum_live_handle = self
+            .descriptors
+            .keys()
+            .chain(self.streams.keys())
+            .chain(self.dir_streams.keys())
+            .copied()
+            .max();
+        self.next_handle = match maximum_live_handle {
+            Some(handle) => handle.checked_add(1).ok_or(FsError::Quota)?,
+            None => FIRST_PREOPEN_FD,
+        };
+        Ok(())
+    }
+
     fn mutating_dir(&self, fd: u32) -> Result<Dir, FsError> {
         let dir = self.get_dir(fd).cloned().ok_or(FsError::BadDescriptor)?;
         if !dir.perms().contains(DirPerms::MUTATE) {
@@ -1303,6 +1559,7 @@ impl CapFs {
     }
 
     fn register_preopen(&mut self, dir: Dir, guest_path: &str) -> Result<u32, FsError> {
+        self.ensure_descriptor_capacity()?;
         let fd = self.alloc_handle()?;
         self.preopen_dirs.insert(
             fd,
@@ -1387,9 +1644,16 @@ mod tests {
     use super::*;
 
     fn test_fs() -> (CapFs, tempfile::TempDir, tempfile::TempDir) {
+        test_fs_with_limits(FilesystemLimits::default())
+    }
+
+    fn test_fs_with_limits(
+        limits: FilesystemLimits,
+    ) -> (CapFs, tempfile::TempDir, tempfile::TempDir) {
         let input = tempfile::tempdir().unwrap();
         let output = tempfile::tempdir().unwrap();
         let fs = CapFs::new()
+            .with_limits(limits)
             .with_input(input.path())
             .unwrap()
             .with_output_dir(
@@ -1735,7 +1999,7 @@ mod tests {
         fs.write_output_path("/output/gone.txt", b"output".to_vec())
             .unwrap();
 
-        fs.clear_output_files();
+        fs.clear_output_files().unwrap();
 
         let input_fd = preopen_fd(&fs, "/input");
         let fd = fs
@@ -1767,13 +2031,139 @@ mod tests {
             .open_at(output_dir, "result.txt", OpenFlags::OPEN_EXISTING)
             .unwrap();
 
-        fs.clear_output_files();
+        fs.clear_output_files().unwrap();
 
         assert_eq!(fs.get_type(input_dir), Ok(DescriptorType::Directory));
         assert_eq!(fs.read_file(input_file, 0, 100).unwrap().0, b"input");
         assert_eq!(fs.get_type(output_dir), Err(FsError::BadDescriptor));
         assert_eq!(fs.get_type(output_file), Err(FsError::BadDescriptor));
         assert_eq!(fs.get_type(output_fd), Ok(DescriptorType::Directory));
+    }
+
+    #[test]
+    fn prepare_for_run_recursively_clears_output_and_preserves_the_root() {
+        let (mut fs, input, output) = test_fs();
+        host_write_input(&input, "keep.txt", b"input");
+        host_create_dir(&output, "build/cache/deep");
+        host_write_output(&output, "build/cache/deep/result.txt", b"output");
+        host_write_output(&output, "top.txt", b"output");
+
+        fs.prepare_for_run().unwrap();
+
+        assert!(output.path().is_dir());
+        assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read(input.path().join("keep.txt")).unwrap(),
+            b"input"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recursive_cleanup_unlinks_directory_symlinks_without_following_them() {
+        use std::os::unix::fs::symlink;
+
+        let (mut fs, _input, output) = test_fs();
+        let outside = tempfile::tempdir().unwrap();
+        host_write_output(&outside, "keep.txt", b"outside");
+        symlink(outside.path(), output.path().join("outside-link")).unwrap();
+
+        fs.prepare_for_run().unwrap();
+
+        assert!(!output.path().join("outside-link").exists());
+        assert_eq!(
+            std::fs::read(outside.path().join("keep.txt")).unwrap(),
+            b"outside"
+        );
+    }
+
+    #[test]
+    fn cleanup_bound_failure_is_returned_and_invalidates_mount_handles() {
+        let limits = FilesystemLimits {
+            max_cleanup_entries: 1,
+            ..FilesystemLimits::default()
+        };
+        let (mut fs, _input, output) = test_fs_with_limits(limits);
+        host_write_output(&output, "one.txt", b"one");
+        host_write_output(&output, "two.txt", b"two");
+
+        let output_fd = preopen_fd(&fs, "/output");
+        let file_fd = fs
+            .open_at(output_fd, "one.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+
+        assert_eq!(fs.prepare_for_run(), Err(FsError::Quota));
+        assert_eq!(fs.get_type(file_fd), Err(FsError::BadDescriptor));
+        assert!(!fs.get_output_files().is_empty());
+    }
+
+    #[test]
+    fn failed_cleanup_does_not_reset_the_previous_run_budget() {
+        let limits = FilesystemLimits {
+            max_creations_per_run: 1,
+            max_cleanup_entries: 1,
+            ..FilesystemLimits::default()
+        };
+        let (mut fs, _input, output) = test_fs_with_limits(limits);
+        host_write_output(&output, "one.txt", b"one");
+        host_write_output(&output, "two.txt", b"two");
+        let output_fd = preopen_fd(&fs, "/output");
+        fs.open_at(output_fd, "created.txt", OpenFlags::CREATE)
+            .unwrap();
+
+        assert_eq!(fs.prepare_for_run(), Err(FsError::Quota));
+        assert_eq!(
+            fs.create_directory_at(output_fd, "still-blocked"),
+            Err(FsError::Quota)
+        );
+    }
+
+    #[test]
+    fn cleanup_handle_recalculation_preserves_live_input_stream_ids() {
+        let (mut fs, input, output) = test_fs();
+        host_write_input(&input, "first.txt", b"first");
+        host_write_input(&input, "second.txt", b"second");
+        host_write_output(&output, "gone.txt", b"gone");
+        let input_fd = preopen_fd(&fs, "/input");
+        let output_fd = preopen_fd(&fs, "/output");
+        let first_fd = fs
+            .open_at(input_fd, "first.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+        let input_stream = fs.create_read_stream(first_fd, 0).unwrap();
+        fs.open_at(output_fd, "gone.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+
+        fs.clear_output_files().unwrap();
+        let second_fd = fs
+            .open_at(input_fd, "second.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+
+        assert_ne!(second_fd, input_stream);
+        assert!(fs.has_stream(input_stream));
+    }
+
+    #[test]
+    fn cleanup_depth_failure_is_returned() {
+        let limits = FilesystemLimits {
+            max_recursive_depth: 1,
+            ..FilesystemLimits::default()
+        };
+        let (mut fs, _input, output) = test_fs_with_limits(limits);
+        host_create_dir(&output, "one/two");
+        host_write_output(&output, "one/two/file.txt", b"data");
+
+        assert_eq!(fs.prepare_for_run(), Err(FsError::Quota));
+        assert!(output.path().join("one/two/file.txt").is_file());
+    }
+
+    #[test]
+    fn clear_mount_rejects_persistent_input() {
+        let (mut fs, input, _output) = test_fs();
+        host_write_input(&input, "keep.txt", b"input");
+        let input_fd = preopen_fd(&fs, "/input");
+
+        assert_eq!(fs.clear_mount(input_fd), Err(FsError::NotPermitted));
+        assert!(input.path().join("keep.txt").is_file());
     }
 
     #[test]
@@ -2277,7 +2667,7 @@ mod tests {
 
     #[test]
     fn read_guest_file_works() {
-        let (fs, input, _o) = test_fs();
+        let (mut fs, input, _o) = test_fs();
         host_write_input(&input, "hello.txt", b"world");
         let data = fs.read_guest_file("/input/hello.txt").unwrap();
         assert_eq!(data, b"world");
@@ -2313,7 +2703,7 @@ mod tests {
     fn read_guest_file_denied_without_read_perm() {
         let output = tempfile::tempdir().unwrap();
         std::fs::write(output.path().join("f.txt"), b"data").unwrap();
-        let fs = CapFs::new()
+        let mut fs = CapFs::new()
             .with_output_dir(output.path(), DirPerms::MUTATE, FilePerms::WRITE)
             .unwrap();
         assert!(fs.read_guest_file("/output/f.txt").is_err());
@@ -2321,13 +2711,13 @@ mod tests {
 
     #[test]
     fn read_guest_file_missing() {
-        let (fs, _i, _o) = test_fs();
+        let (mut fs, _i, _o) = test_fs();
         assert!(fs.read_guest_file("/input/nope.txt").is_err());
     }
 
     #[test]
     fn read_guest_file_outside_preopens() {
-        let (fs, _i, _o) = test_fs();
+        let (mut fs, _i, _o) = test_fs();
         assert!(fs.read_guest_file("/etc/passwd").is_err());
         assert!(fs.read_guest_file("/tmp/something").is_err());
         assert!(fs.read_guest_file("/secret/data.txt").is_err());
@@ -2335,7 +2725,7 @@ mod tests {
 
     #[test]
     fn read_guest_file_traversal() {
-        let (fs, _i, _o) = test_fs();
+        let (mut fs, _i, _o) = test_fs();
         assert!(fs.read_guest_file("/input/../etc/passwd").is_err());
         assert!(fs.read_guest_file("/input/../../root/.ssh/id_rsa").is_err());
     }
@@ -2960,15 +3350,13 @@ mod tests {
     fn dir_stream_errors_when_directory_exceeds_limit() {
         let (mut fs, _i, output) = test_fs();
         let output_fd = preopen_fd(&fs, "/output");
+        fs.limits.max_directory_entries_per_listing = 2;
 
-        for i in 0..=CapFs::MAX_DIR_ENTRIES {
+        for i in 0..=2 {
             host_write_output(&output, &format!("file-{i}.txt"), b"");
         }
 
-        assert!(matches!(
-            fs.create_dir_stream(output_fd),
-            Err(FsError::Io(_))
-        ));
+        assert_eq!(fs.create_dir_stream(output_fd), Err(FsError::Quota));
     }
 
     // ── Append stream test ──────────────────────────────────────────
@@ -2985,6 +3373,176 @@ mod tests {
 
         let (data, _) = fs.read_file(fd, 0, 100).unwrap();
         assert_eq!(data, b"first second");
+    }
+
+    #[test]
+    fn filesystem_limit_defaults_match_the_phase_one_policy() {
+        let limits = FilesystemLimits::default();
+        assert_eq!(limits.max_open_descriptors, 1_024);
+        assert_eq!(limits.max_open_streams, 1_024);
+        assert_eq!(limits.max_single_read_bytes, 16 * 1024 * 1024);
+        assert_eq!(limits.max_read_bytes_per_run, 256 * 1024 * 1024);
+        assert_eq!(limits.max_written_bytes_per_run, 64 * 1024 * 1024);
+        assert_eq!(limits.max_creations_per_run, 10_000);
+        assert_eq!(limits.max_directory_entries_per_listing, 10_000);
+        assert_eq!(limits.max_directory_entries_per_run, 100_000);
+        assert_eq!(limits.max_cleanup_entries, 100_000);
+        assert_eq!(limits.max_recursive_depth, 64);
+    }
+
+    #[test]
+    fn open_descriptor_limit_counts_preopens_and_releases_closed_handles() {
+        let limits = FilesystemLimits {
+            max_open_descriptors: 3,
+            ..FilesystemLimits::default()
+        };
+        let (mut fs, input, _output) = test_fs_with_limits(limits);
+        host_write_input(&input, "a.txt", b"a");
+        host_write_input(&input, "b.txt", b"b");
+        let input_fd = preopen_fd(&fs, "/input");
+
+        let first = fs
+            .open_at(input_fd, "a.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+        assert_eq!(
+            fs.open_at(input_fd, "b.txt", OpenFlags::OPEN_EXISTING),
+            Err(FsError::Quota)
+        );
+
+        fs.close_descriptor(first).unwrap();
+        assert!(
+            fs.open_at(input_fd, "b.txt", OpenFlags::OPEN_EXISTING)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn stream_limit_combines_file_and_directory_streams() {
+        let limits = FilesystemLimits {
+            max_open_streams: 2,
+            ..FilesystemLimits::default()
+        };
+        let (mut fs, input, _output) = test_fs_with_limits(limits);
+        host_write_input(&input, "data.txt", b"data");
+        let input_fd = preopen_fd(&fs, "/input");
+        let file_fd = fs
+            .open_at(input_fd, "data.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+
+        let first = fs.create_read_stream(file_fd, 0).unwrap();
+        let directory = fs.create_dir_stream(input_fd).unwrap();
+        assert_eq!(fs.create_read_stream(file_fd, 0), Err(FsError::Quota));
+
+        fs.close_stream(first);
+        assert!(fs.create_read_stream(file_fd, 0).is_ok());
+        fs.close_dir_stream(directory);
+    }
+
+    #[test]
+    fn read_limits_enforce_single_and_total_bytes_and_reset_per_run() {
+        let limits = FilesystemLimits {
+            max_single_read_bytes: 3,
+            max_read_bytes_per_run: 5,
+            ..FilesystemLimits::default()
+        };
+        let (mut fs, input, _output) = test_fs_with_limits(limits);
+        host_write_input(&input, "data.txt", b"abcdef");
+        let input_fd = preopen_fd(&fs, "/input");
+        let file_fd = fs
+            .open_at(input_fd, "data.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+
+        assert_eq!(fs.read_file(file_fd, 0, 100).unwrap().0, b"abc");
+        assert_eq!(fs.read_file(file_fd, 3, 2).unwrap().0, b"de");
+        assert_eq!(fs.read_file(file_fd, 5, 1), Err(FsError::Quota));
+
+        fs.prepare_for_run().unwrap();
+        assert_eq!(fs.read_file(file_fd, 5, 1).unwrap().0, b"f");
+        assert!(fs.read_guest_file("/input/data.txt").is_err());
+    }
+
+    #[test]
+    fn helper_and_descriptor_reads_share_one_per_run_budget() {
+        let limits = FilesystemLimits {
+            max_single_read_bytes: 8,
+            max_read_bytes_per_run: 5,
+            ..FilesystemLimits::default()
+        };
+        let (mut fs, input, _output) = test_fs_with_limits(limits);
+        host_write_input(&input, "first.txt", b"abc");
+        host_write_input(&input, "second.txt", b"def");
+        let input_fd = preopen_fd(&fs, "/input");
+        let first = fs
+            .open_at(input_fd, "first.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+
+        assert_eq!(fs.read_file(first, 0, 3).unwrap().0, b"abc");
+        assert!(fs.read_guest_file("/input/second.txt").is_err());
+    }
+
+    #[test]
+    fn helper_and_descriptor_writes_share_one_per_run_budget() {
+        let limits = FilesystemLimits {
+            max_written_bytes_per_run: 5,
+            ..FilesystemLimits::default()
+        };
+        let (mut fs, _input, output) = test_fs_with_limits(limits);
+        let output_fd = preopen_fd(&fs, "/output");
+        let file_fd = fs
+            .open_at(output_fd, "first.txt", OpenFlags::CREATE)
+            .unwrap();
+
+        fs.write_file(file_fd, 0, b"abc").unwrap();
+        assert!(
+            fs.write_output_path("/output/second.txt", b"def".to_vec())
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(output.path().join("first.txt")).unwrap(),
+            b"abc"
+        );
+        assert!(!output.path().join("second.txt").exists());
+    }
+
+    #[test]
+    fn creation_budget_resets_only_after_successful_run_preparation() {
+        let limits = FilesystemLimits {
+            max_creations_per_run: 1,
+            ..FilesystemLimits::default()
+        };
+        let (mut fs, _input, output) = test_fs_with_limits(limits);
+        let output_fd = preopen_fd(&fs, "/output");
+
+        fs.open_at(output_fd, "first.txt", OpenFlags::CREATE)
+            .unwrap();
+        assert_eq!(
+            fs.create_directory_at(output_fd, "blocked"),
+            Err(FsError::Quota)
+        );
+
+        fs.prepare_for_run().unwrap();
+        fs.create_directory_at(output_fd, "allowed").unwrap();
+        assert!(output.path().join("allowed").is_dir());
+    }
+
+    #[test]
+    fn directory_entry_budget_is_cumulative_within_a_run() {
+        let limits = FilesystemLimits {
+            max_directory_entries_per_listing: 10,
+            max_directory_entries_per_run: 2,
+            ..FilesystemLimits::default()
+        };
+        let (mut fs, input, _output) = test_fs_with_limits(limits);
+        host_write_input(&input, "a.txt", b"a");
+        host_write_input(&input, "b.txt", b"b");
+        let input_fd = preopen_fd(&fs, "/input");
+
+        let stream = fs.create_dir_stream(input_fd).unwrap();
+        fs.close_dir_stream(stream);
+        assert_eq!(fs.create_dir_stream(input_fd), Err(FsError::Quota));
+
+        fs.prepare_for_run().unwrap();
+        assert!(fs.create_dir_stream(input_fd).is_ok());
     }
 
     #[test]

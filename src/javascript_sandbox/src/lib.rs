@@ -236,7 +236,7 @@ impl JsGuestSandbox {
         let read_state = state.clone();
         proto
             .register("host", "read_file", move |path: String| -> String {
-                let Ok(files) = read_state.files.lock() else {
+                let Ok(mut files) = read_state.files.lock() else {
                     return json_error("filesystem mutex poisoned");
                 };
                 match files.read_guest_file(&path) {
@@ -370,7 +370,8 @@ impl JsGuestSandbox {
         self.files
             .lock()
             .map_err(|_| anyhow::anyhow!("filesystem mutex poisoned"))?
-            .clear_output_files();
+            .prepare_for_run()
+            .map_err(|error| anyhow::anyhow!("failed to prepare filesystem: {error:?}"))?;
 
         let request = serde_json::to_string(code)?;
 

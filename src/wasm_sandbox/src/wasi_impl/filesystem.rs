@@ -188,7 +188,7 @@ impl fs_types::Descriptor<wall_clock::Datetime, u32, Resource<Stream>, Resource<
         offset: fs_types::Filesize,
     ) -> HlResult<Result<(Vec<u8>, bool), fs_types::ErrorCode>> {
         let fd = *self_;
-        let Ok(fs) = self.fs.lock() else {
+        let Ok(mut fs) = self.fs.lock() else {
             return Err(fs_types::ErrorCode::Io);
         };
         fs.read_file(fd, offset, length).map_err(Into::into)

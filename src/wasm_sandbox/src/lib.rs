@@ -271,7 +271,8 @@ impl WasmComponentSandbox {
         self.fs
             .lock()
             .map_err(|_| anyhow::anyhow!("filesystem mutex poisoned"))?
-            .clear_output_files();
+            .prepare_for_run()
+            .map_err(|error| anyhow::anyhow!("failed to prepare filesystem: {error:?}"))?;
 
         let code_owned = code.to_string();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

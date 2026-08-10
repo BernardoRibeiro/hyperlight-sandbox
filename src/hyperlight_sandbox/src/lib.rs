@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 pub use cap_fs::{
-    CapFs, DescriptorFlags, DescriptorStat, DescriptorType, Dir, DirPerms, FilePerms, FsError,
-    OpenFlags,
+    CapFs, DescriptorFlags, DescriptorStat, DescriptorType, Dir, DirPerms, FilePerms,
+    FilesystemLimits, FsError, OpenFlags,
 };
 pub use network::{HttpMethod, MethodFilter, NetworkPermission, NetworkPermissions};
 use serde::{Deserialize, Serialize};
@@ -183,7 +183,10 @@ impl<G: Guest> Sandbox<G> {
         self.fs
             .lock()
             .map_err(|_| anyhow::anyhow!("filesystem mutex poisoned during snapshot restore"))?
-            .clear_output_files();
+            .prepare_for_run()
+            .map_err(|error| {
+                anyhow::anyhow!("failed to reset filesystem after restore: {error:?}")
+            })?;
         Ok(())
     }
 
@@ -238,6 +241,7 @@ pub struct SandboxBuilder<G = NoGuest> {
     input_dir: Option<PathBuf>,
     output_dir: Option<(PathBuf, DirPerms, FilePerms)>,
     temp_output: bool,
+    filesystem_limits: FilesystemLimits,
 }
 
 impl SandboxBuilder<NoGuest> {
@@ -255,6 +259,7 @@ impl Default for SandboxBuilder<NoGuest> {
             input_dir: None,
             output_dir: None,
             temp_output: false,
+            filesystem_limits: FilesystemLimits::default(),
         }
     }
 }
@@ -314,6 +319,12 @@ impl<G> SandboxBuilder<G> {
         self.temp_output = true;
         self
     }
+
+    /// Configure filesystem resource limits and per-run quotas.
+    pub fn filesystem_limits(mut self, limits: FilesystemLimits) -> Self {
+        self.filesystem_limits = limits;
+        self
+    }
 }
 
 impl SandboxBuilder<NoGuest> {
@@ -328,6 +339,7 @@ impl SandboxBuilder<NoGuest> {
             input_dir: self.input_dir,
             output_dir: self.output_dir,
             temp_output: self.temp_output,
+            filesystem_limits: self.filesystem_limits,
         }
     }
 }
@@ -338,7 +350,7 @@ where
 {
     pub fn build(self) -> Result<Sandbox<G>> {
         let network = std::sync::Arc::new(std::sync::Mutex::new(NetworkPermissions::new()));
-        let mut vfs = CapFs::new();
+        let mut vfs = CapFs::new().with_limits(self.filesystem_limits);
         if let Some(input_dir) = &self.input_dir {
             vfs = vfs.with_input(input_dir)?;
         }
