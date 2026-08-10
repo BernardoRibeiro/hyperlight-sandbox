@@ -39,6 +39,7 @@ pub enum FsError {
     NotPermitted,
     NoEntry,
     InvalidPath,
+    SymlinkLoop,
     Io(String),
 }
 
@@ -51,6 +52,7 @@ pub enum FsError {
 pub enum DescriptorType {
     Directory,
     RegularFile,
+    SymbolicLink,
 }
 
 /// Metadata about a file or directory.
@@ -85,6 +87,15 @@ bitflags::bitflags! {
     pub struct FilePerms: u8 {
         const READ = 0b01;
         const WRITE = 0b10;
+    }
+}
+
+bitflags::bitflags! {
+    /// Flags controlling how the final component of a guest path is resolved.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct PathFlags: u8 {
+        /// Follow a symbolic link in the final path component.
+        const SYMLINK_FOLLOW = 0b01;
     }
 }
 
@@ -141,13 +152,131 @@ impl Dir {
 // Internal types
 // ---------------------------------------------------------------------------
 
+/// Maximum accepted UTF-8 byte length for a guest-relative path.
+const MAX_GUEST_PATH_BYTES: usize = 4096;
+
+/// Maximum number of normalized components in a guest-relative path.
+const MAX_GUEST_PATH_COMPONENTS: usize = 256;
+
+/// A validated, normalized path relative to a filesystem capability.
+///
+/// Values can only be constructed by the lexical policy below or as the
+/// internal empty path representing a preopen root. Authorization is still
+/// performed by `cap-std`; this type prevents unchecked guest strings from
+/// reaching filesystem operations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GuestRelativePath {
+    normalized: String,
+    component_count: usize,
+    requires_directory: bool,
+}
+
+impl GuestRelativePath {
+    fn root() -> Self {
+        Self {
+            normalized: String::new(),
+            component_count: 0,
+            requires_directory: true,
+        }
+    }
+
+    fn parse(path: &str) -> Result<Self, FsError> {
+        if path.is_empty()
+            || path.len() > MAX_GUEST_PATH_BYTES
+            || path.starts_with('/')
+            || path.contains('\\')
+            || path.contains('\0')
+        {
+            return Err(FsError::InvalidPath);
+        }
+
+        let requires_directory = path.ends_with('/')
+            || path.rsplit('/').find(|component| !component.is_empty()) == Some(".");
+        let mut components = Vec::new();
+
+        for component in path.split('/') {
+            match component {
+                "" | "." => continue,
+                ".." => return Err(FsError::InvalidPath),
+                _ => {}
+            }
+
+            // Reject Windows drive prefixes even when compiling on Unix so
+            // the guest path language has identical cross-platform meaning.
+            if components.is_empty() && Self::has_windows_drive_prefix(component) {
+                return Err(FsError::InvalidPath);
+            }
+
+            components.push(component);
+            if components.len() > MAX_GUEST_PATH_COMPONENTS {
+                return Err(FsError::InvalidPath);
+            }
+        }
+
+        if components.is_empty() {
+            return Err(FsError::InvalidPath);
+        }
+
+        let normalized = components.join("/");
+        if normalized.len() > MAX_GUEST_PATH_BYTES {
+            return Err(FsError::InvalidPath);
+        }
+
+        Ok(Self {
+            normalized,
+            component_count: components.len(),
+            requires_directory,
+        })
+    }
+
+    fn has_windows_drive_prefix(component: &str) -> bool {
+        let bytes = component.as_bytes();
+        bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+    }
+
+    fn join(&self, child: &Self) -> Result<Self, FsError> {
+        let component_count = self
+            .component_count
+            .checked_add(child.component_count)
+            .ok_or(FsError::InvalidPath)?;
+        if component_count > MAX_GUEST_PATH_COMPONENTS {
+            return Err(FsError::InvalidPath);
+        }
+
+        let normalized = if self.normalized.is_empty() {
+            child.normalized.clone()
+        } else {
+            format!("{}/{}", self.normalized, child.normalized)
+        };
+        if normalized.len() > MAX_GUEST_PATH_BYTES {
+            return Err(FsError::InvalidPath);
+        }
+
+        Ok(Self {
+            normalized,
+            component_count,
+            requires_directory: child.requires_directory,
+        })
+    }
+
+    fn as_path(&self) -> &Path {
+        Path::new(&self.normalized)
+    }
+}
+
 struct DescriptorEntry {
     root_fd: u32,
-    relative_path: PathBuf,
+    relative_path: GuestRelativePath,
     descriptor_type: DescriptorType,
     is_preopen: bool,
     parent_fd: Option<u32>,
     directory: Option<Dir>,
+}
+
+struct ResolvedGuestPath {
+    root_fd: u32,
+    dir_relative: GuestRelativePath,
+    root_relative: GuestRelativePath,
 }
 
 #[derive(Clone)]
@@ -285,7 +414,10 @@ impl CapFs {
     // -----------------------------------------------------------------------
 
     pub fn write_output_path(&mut self, path: &str, data: Vec<u8>) -> Result<()> {
-        let key = Self::normalize_path(path, "output")?;
+        let key = Self::parse_rooted_guest_path(path, "output")?;
+        if key.requires_directory {
+            anyhow::bail!("output path must name a file: {path}");
+        }
         let output_fd = self
             .output_fd
             .ok_or_else(|| anyhow::anyhow!("no output directory configured"))?;
@@ -299,10 +431,10 @@ impl CapFs {
         let mut file = output
             .dir
             .cap_std()
-            .create(&key)
-            .with_context(|| format!("failed to create output file: {key}"))?;
+            .create(key.as_path())
+            .with_context(|| format!("failed to create output file: {path}"))?;
         file.write_all(&data)
-            .with_context(|| format!("failed to write output file: {key}"))?;
+            .with_context(|| format!("failed to write output file: {path}"))?;
         Ok(())
     }
 
@@ -311,11 +443,18 @@ impl CapFs {
 
     /// Read a file from a preopened directory by guest path (e.g. "/input/data.txt").
     pub fn read_guest_file(&self, guest_path: &str) -> Result<Vec<u8>> {
-        // Determine which preopen and filename from the path.
-        let trimmed = guest_path.trim().trim_start_matches('/');
-        let (dir_name, file_name) = trimmed.split_once('/').ok_or_else(|| {
+        // Determine which preopen and validated relative path from the path.
+        let without_leading = guest_path
+            .strip_prefix('/')
+            .ok_or_else(|| anyhow::anyhow!("guest path must be absolute: {guest_path}"))?;
+        let (dir_name, relative) = without_leading.split_once('/').ok_or_else(|| {
             anyhow::anyhow!("path must include a directory and filename: {guest_path}")
         })?;
+        let file_name = GuestRelativePath::parse(relative)
+            .map_err(|_| anyhow::anyhow!("invalid guest path: {guest_path}"))?;
+        if file_name.requires_directory {
+            anyhow::bail!("guest path must name a file: {guest_path}");
+        }
         let preopen_path = format!("/{dir_name}");
         let dir = self
             .dir_by_guest_path(&preopen_path)
@@ -328,7 +467,7 @@ impl CapFs {
         }
         let file = dir
             .cap_std()
-            .open(file_name)
+            .open(file_name.as_path())
             .map_err(|_| anyhow::anyhow!("file not found: {guest_path}"))?;
         let metadata = file
             .metadata()
@@ -451,7 +590,12 @@ impl CapFs {
             return None;
         }
         let dir = self.get_dir(entry.root_fd)?;
-        Some(dir.cap_std().metadata(&entry.relative_path).ok()?.len())
+        Some(
+            dir.cap_std()
+                .metadata(entry.relative_path.as_path())
+                .ok()?
+                .len(),
+        )
     }
 
     pub fn find_file_in_dir(&self, dir_fd: u32, name: &str) -> Option<u32> {
@@ -460,7 +604,12 @@ impl CapFs {
                 continue;
             }
             if entry.parent_fd == Some(dir_fd)
-                && entry.relative_path.file_name().and_then(|n| n.to_str()) == Some(name)
+                && entry
+                    .relative_path
+                    .as_path()
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    == Some(name)
             {
                 return Some(fd);
             }
@@ -515,13 +664,37 @@ impl CapFs {
 
     /// Get metadata for a path relative to a directory descriptor.
     pub fn stat_at(&self, dir_fd: u32, path: &str) -> Result<DescriptorStat, FsError> {
+        self.stat_at_with_path_flags(dir_fd, path, PathFlags::SYMLINK_FOLLOW)
+    }
+
+    /// Get metadata for a validated path relative to a directory descriptor.
+    pub fn stat_at_with_path_flags(
+        &self,
+        dir_fd: u32,
+        path: &str,
+        path_flags: PathFlags,
+    ) -> Result<DescriptorStat, FsError> {
+        let resolved = self.resolve_at(dir_fd, path)?;
         let dir = self.get_dir(dir_fd).ok_or(FsError::BadDescriptor)?;
         if !dir.perms().contains(DirPerms::READ) {
             return Err(FsError::NotPermitted);
         }
-        let metadata = dir.cap_std().metadata(path).map_err(|_| FsError::NoEntry)?;
+        let metadata = if path_flags.contains(PathFlags::SYMLINK_FOLLOW) {
+            dir.cap_std().metadata(resolved.dir_relative.as_path())
+        } else {
+            dir.cap_std()
+                .symlink_metadata(resolved.dir_relative.as_path())
+        }
+        .map_err(|_| FsError::NoEntry)?;
+
+        if resolved.dir_relative.requires_directory && !metadata.is_dir() {
+            return Err(FsError::InvalidPath);
+        }
+
         let descriptor_type = if metadata.is_dir() {
             DescriptorType::Directory
+        } else if metadata.file_type().is_symlink() {
+            DescriptorType::SymbolicLink
         } else {
             DescriptorType::RegularFile
         };
@@ -564,24 +737,50 @@ impl CapFs {
     const MAX_READ_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
 
     pub fn open_at(&mut self, dir_fd: u32, path: &str, flags: OpenFlags) -> Result<u32, FsError> {
-        let (root_fd, relative_path) = self.resolve_at(dir_fd, path)?;
+        self.open_at_with_path_flags(dir_fd, path, PathFlags::SYMLINK_FOLLOW, flags)
+    }
+
+    /// Open a validated path relative to a directory descriptor.
+    pub fn open_at_with_path_flags(
+        &mut self,
+        dir_fd: u32,
+        path: &str,
+        path_flags: PathFlags,
+        flags: OpenFlags,
+    ) -> Result<u32, FsError> {
+        let resolved = self.resolve_at(dir_fd, path)?;
         let dir = self
             .get_dir(dir_fd)
             .cloned()
             .ok_or(FsError::BadDescriptor)?;
+        let dir_relative = resolved.dir_relative.as_path();
 
         let create = flags.contains(OpenFlags::CREATE);
         let truncate = flags.contains(OpenFlags::TRUNCATE);
-        let require_directory = flags.contains(OpenFlags::DIRECTORY);
+        let require_directory =
+            flags.contains(OpenFlags::DIRECTORY) || resolved.dir_relative.requires_directory;
 
         if (create || truncate) && !dir.perms().contains(DirPerms::MUTATE) {
             return Err(FsError::NotPermitted);
         }
 
-        let metadata = dir.cap_std().metadata(path).ok();
+        let follow_symlinks = path_flags.contains(PathFlags::SYMLINK_FOLLOW);
+        let metadata = if follow_symlinks {
+            dir.cap_std().metadata(dir_relative)
+        } else {
+            dir.cap_std().symlink_metadata(dir_relative)
+        }
+        .ok();
         let exists = metadata.is_some();
         if !exists && !create {
             return Err(FsError::NoEntry);
+        }
+        if !follow_symlinks
+            && metadata
+                .as_ref()
+                .is_some_and(|meta| meta.file_type().is_symlink())
+        {
+            return Err(FsError::SymlinkLoop);
         }
         if require_directory && !metadata.as_ref().is_some_and(|meta| meta.is_dir()) {
             return Err(FsError::NoEntry);
@@ -600,14 +799,19 @@ impl CapFs {
         }
         if !exists || truncate {
             dir.cap_std()
-                .create(path)
+                .create(dir_relative)
                 .map_err(|e| FsError::Io(e.to_string()))?;
         }
 
-        let metadata = dir
-            .cap_std()
-            .metadata(path)
-            .map_err(|e| FsError::Io(e.to_string()))?;
+        let metadata = if follow_symlinks {
+            dir.cap_std().metadata(dir_relative)
+        } else {
+            dir.cap_std().symlink_metadata(dir_relative)
+        }
+        .map_err(|e| FsError::Io(e.to_string()))?;
+        if !follow_symlinks && metadata.file_type().is_symlink() {
+            return Err(FsError::SymlinkLoop);
+        }
         let descriptor_type = if metadata.is_dir() {
             DescriptorType::Directory
         } else {
@@ -616,7 +820,7 @@ impl CapFs {
         let directory = if descriptor_type == DescriptorType::Directory {
             let opened = dir
                 .cap_std()
-                .open_dir(path)
+                .open_dir(dir_relative)
                 .map_err(|e| FsError::Io(e.to_string()))?;
             Some(Dir::new(opened, dir.perms(), dir.file_perms()))
         } else {
@@ -627,8 +831,8 @@ impl CapFs {
         self.descriptors.insert(
             fd,
             DescriptorEntry {
-                root_fd,
-                relative_path,
+                root_fd: resolved.root_fd,
+                relative_path: resolved.root_relative,
                 descriptor_type,
                 is_preopen: false,
                 parent_fd: Some(dir_fd),
@@ -915,7 +1119,7 @@ impl CapFs {
             fd,
             DescriptorEntry {
                 root_fd: fd,
-                relative_path: PathBuf::new(),
+                relative_path: GuestRelativePath::root(),
                 descriptor_type: DescriptorType::Directory,
                 is_preopen: true,
                 parent_fd: None,
@@ -925,23 +1129,10 @@ impl CapFs {
         Ok(fd)
     }
 
-    fn validate_relative_component(path: &str) -> Result<(), FsError> {
-        if path.is_empty()
-            || path == "."
-            || path == ".."
-            || path.contains('/')
-            || path.contains('\\')
-            || path.contains('\0')
-        {
-            return Err(FsError::InvalidPath);
-        }
-        Ok(())
-    }
-
-    /// Resolve one path component relative to an opened directory while
+    /// Resolve a validated nested path relative to an opened directory while
     /// retaining the descriptor's preopen-relative identity.
-    fn resolve_at(&self, dir_fd: u32, path: &str) -> Result<(u32, PathBuf), FsError> {
-        Self::validate_relative_component(path)?;
+    fn resolve_at(&self, dir_fd: u32, path: &str) -> Result<ResolvedGuestPath, FsError> {
+        let dir_relative = GuestRelativePath::parse(path)?;
         let parent = self
             .descriptors
             .get(&dir_fd)
@@ -949,9 +1140,12 @@ impl CapFs {
         if parent.descriptor_type != DescriptorType::Directory || parent.directory.is_none() {
             return Err(FsError::BadDescriptor);
         }
-        let mut relative_path = parent.relative_path.clone();
-        relative_path.push(path);
-        Ok((parent.root_fd, relative_path))
+        let root_relative = parent.relative_path.join(&dir_relative)?;
+        Ok(ResolvedGuestPath {
+            root_fd: parent.root_fd,
+            dir_relative,
+            root_relative,
+        })
     }
 
     fn root_dir(&self, root_fd: u32) -> Option<&Dir> {
@@ -967,33 +1161,13 @@ impl CapFs {
         Ok((root, entry.relative_path.as_path()))
     }
 
-    fn normalize_path(path: &str, root: &str) -> Result<String> {
-        let trimmed = path.trim();
-        let without_leading = trimmed.trim_start_matches('/');
-        let Some(remainder) = without_leading.strip_prefix(root) else {
-            return Err(anyhow::anyhow!("path must be rooted at /{root}: {trimmed}"));
-        };
-        let Some(normalized) = remainder.strip_prefix('/') else {
-            return Err(anyhow::anyhow!(
-                "path must include a file name under /{root}: {trimmed}"
-            ));
-        };
-        if normalized.is_empty() {
-            return Err(anyhow::anyhow!(
-                "path must include a file name under /{root}: {trimmed}"
-            ));
-        }
-        for component in normalized.split('/') {
-            if component.is_empty() || component == "." || component == ".." {
-                return Err(anyhow::anyhow!("path contains unsafe component: {trimmed}"));
-            }
-            if component.contains('\\') {
-                return Err(anyhow::anyhow!(
-                    "path contains unsupported separator: {trimmed}"
-                ));
-            }
-        }
-        Ok(normalized.to_string())
+    fn parse_rooted_guest_path(path: &str, root: &str) -> Result<GuestRelativePath> {
+        let prefix = format!("/{root}/");
+        let relative = path
+            .strip_prefix(&prefix)
+            .ok_or_else(|| anyhow::anyhow!("path must be rooted at /{root}: {path}"))?;
+        GuestRelativePath::parse(relative)
+            .map_err(|_| anyhow::anyhow!("invalid path under /{root}: {path}"))
     }
 
     fn alloc_handle(&mut self) -> Result<u32, FsError> {
@@ -1012,6 +1186,8 @@ impl CapFs {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     fn test_fs() -> (CapFs, tempfile::TempDir, tempfile::TempDir) {
@@ -1049,6 +1225,97 @@ mod tests {
             .find(|(_, p)| *p == path)
             .unwrap()
             .0
+    }
+
+    #[test]
+    fn guest_relative_path_accepts_and_normalizes_safe_paths() {
+        let cases = [
+            ("src/lib.rs", "src/lib.rs", false),
+            ("./src/lib.rs", "src/lib.rs", false),
+            ("src//./nested///lib.rs", "src/nested/lib.rs", false),
+            (
+                "dir with spaces/file.txt",
+                "dir with spaces/file.txt",
+                false,
+            ),
+            (".git/config", ".git/config", false),
+            ("unicode/olá.txt", "unicode/olá.txt", false),
+            ("src/", "src", true),
+            ("src/.", "src", true),
+        ];
+
+        for (input, normalized, requires_directory) in cases {
+            let parsed = GuestRelativePath::parse(input).unwrap();
+            assert_eq!(parsed.as_path(), Path::new(normalized));
+            assert_eq!(parsed.requires_directory, requires_directory);
+        }
+    }
+
+    #[test]
+    fn guest_relative_path_rejects_unsafe_and_ambiguous_paths() {
+        for path in [
+            "",
+            ".",
+            "./",
+            "..",
+            "../secret",
+            "a/../../secret",
+            "/absolute/path",
+            "a\\b",
+            "C:\\secret",
+            "C:/secret",
+            "C:secret",
+            "file\0name",
+        ] {
+            assert_eq!(
+                GuestRelativePath::parse(path),
+                Err(FsError::InvalidPath),
+                "unexpected result for {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn guest_relative_path_enforces_length_and_depth_limits() {
+        let overlong = "a".repeat(MAX_GUEST_PATH_BYTES + 1);
+        assert_eq!(
+            GuestRelativePath::parse(&overlong),
+            Err(FsError::InvalidPath)
+        );
+
+        let too_deep = std::iter::repeat_n("a", MAX_GUEST_PATH_COMPONENTS + 1)
+            .collect::<Vec<_>>()
+            .join("/");
+        assert_eq!(
+            GuestRelativePath::parse(&too_deep),
+            Err(FsError::InvalidPath)
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn guest_relative_path_never_accepts_parent_components(
+            prefix in "[a-z]{0,16}",
+            suffix in "[a-z]{0,16}",
+        ) {
+            let path = format!("{prefix}/../{suffix}");
+            prop_assert_eq!(
+                GuestRelativePath::parse(&path),
+                Err(FsError::InvalidPath)
+            );
+        }
+
+        #[test]
+        fn guest_relative_path_never_accepts_backslashes(
+            prefix in "[a-z]{0,16}",
+            suffix in "[a-z]{0,16}",
+        ) {
+            let path = format!("{prefix}\\{suffix}");
+            prop_assert_eq!(
+                GuestRelativePath::parse(&path),
+                Err(FsError::InvalidPath)
+            );
+        }
     }
 
     #[test]
@@ -1110,6 +1377,73 @@ mod tests {
         assert_eq!(
             entries,
             vec![("lib.rs".to_string(), false), ("nested".to_string(), true)]
+        );
+    }
+
+    #[test]
+    fn open_at_and_stat_at_accept_safe_nested_paths() {
+        let (mut fs, input, _o) = test_fs();
+        host_create_dir(&input, "src/nested");
+        host_create_dir(&input, "dir with spaces");
+        host_create_dir(&input, ".git");
+        host_create_dir(&input, "unicode");
+        host_write_input(&input, "src/nested/lib.rs", b"nested");
+        host_write_input(&input, "dir with spaces/file.txt", b"spaces");
+        host_write_input(&input, ".git/config", b"git");
+        host_write_input(&input, "unicode/olá.txt", b"unicode");
+
+        let input_fd = preopen_fd(&fs, "/input");
+        for (path, contents) in [
+            ("./src/nested/lib.rs", b"nested".as_slice()),
+            ("dir with spaces/file.txt", b"spaces".as_slice()),
+            (".git/config", b"git".as_slice()),
+            ("unicode/olá.txt", b"unicode".as_slice()),
+        ] {
+            let fd = fs
+                .open_at(input_fd, path, OpenFlags::OPEN_EXISTING)
+                .unwrap();
+            assert_eq!(fs.read_file(fd, 0, 100).unwrap().0, contents);
+            assert_eq!(
+                fs.stat_at(input_fd, path).unwrap().descriptor_type,
+                DescriptorType::RegularFile
+            );
+        }
+    }
+
+    #[test]
+    fn nested_path_is_composed_with_an_opened_directory_identity() {
+        let (mut fs, input, _o) = test_fs();
+        host_create_dir(&input, "src/nested");
+        host_write_input(&input, "src/nested/lib.rs", b"nested");
+
+        let input_fd = preopen_fd(&fs, "/input");
+        let src_fd = fs.open_at(input_fd, "src", OpenFlags::DIRECTORY).unwrap();
+        let file_fd = fs
+            .open_at(src_fd, "./nested/lib.rs", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+
+        assert_eq!(fs.read_file(file_fd, 0, 100).unwrap().0, b"nested");
+        assert_eq!(
+            fs.descriptors[&file_fd].relative_path.as_path(),
+            Path::new("src/nested/lib.rs")
+        );
+    }
+
+    #[test]
+    fn nested_path_composition_enforces_total_depth_limit() {
+        let (mut fs, input, _o) = test_fs();
+        let parent_path = std::iter::repeat_n("a", 200).collect::<Vec<_>>().join("/");
+        host_create_dir(&input, &parent_path);
+
+        let input_fd = preopen_fd(&fs, "/input");
+        let parent_fd = fs
+            .open_at(input_fd, &parent_path, OpenFlags::DIRECTORY)
+            .unwrap();
+        let child_path = std::iter::repeat_n("b", 57).collect::<Vec<_>>().join("/");
+
+        assert_eq!(
+            fs.open_at(parent_fd, &child_path, OpenFlags::OPEN_EXISTING),
+            Err(FsError::InvalidPath)
         );
     }
 
@@ -1291,8 +1625,10 @@ mod tests {
 
     #[test]
     fn open_at_rejects_bad_paths() {
-        let (mut fs, _i, _o) = test_fs();
+        let (mut fs, _i, output) = test_fs();
         let output_fd = preopen_fd(&fs, "/output");
+        host_create_dir(&output, "a");
+        host_create_dir(&output, "trailing");
 
         // Path traversal
         assert_eq!(
@@ -1304,13 +1640,10 @@ mod tests {
             Err(FsError::InvalidPath)
         );
 
-        // Nested paths (only single-segment names allowed)
+        // Parent components are rejected even when a lexical normalization
+        // would appear to remain under the preopen.
         assert_eq!(
-            fs.open_at(output_fd, "a/b", OpenFlags::CREATE),
-            Err(FsError::InvalidPath)
-        );
-        assert_eq!(
-            fs.open_at(output_fd, "dir/file.txt", OpenFlags::CREATE),
+            fs.open_at(output_fd, "a/../../x", OpenFlags::CREATE),
             Err(FsError::InvalidPath)
         );
 
@@ -1321,6 +1654,10 @@ mod tests {
         );
         assert_eq!(
             fs.open_at(output_fd, "..\\x", OpenFlags::CREATE),
+            Err(FsError::InvalidPath)
+        );
+        assert_eq!(
+            fs.open_at(output_fd, "C:/secret", OpenFlags::CREATE),
             Err(FsError::InvalidPath)
         );
 
@@ -1348,14 +1685,21 @@ mod tests {
             Err(FsError::InvalidPath)
         );
 
-        // Leading/trailing slashes
+        // Absolute paths are never accepted.
         assert_eq!(
             fs.open_at(output_fd, "/absolute", OpenFlags::CREATE),
             Err(FsError::InvalidPath)
         );
+
+        // A trailing slash is operation-sensitive: it works for a directory
+        // but cannot be used to create or open a regular file.
+        assert!(
+            fs.open_at(output_fd, "trailing/", OpenFlags::DIRECTORY)
+                .is_ok()
+        );
         assert_eq!(
-            fs.open_at(output_fd, "trailing/", OpenFlags::CREATE),
-            Err(FsError::InvalidPath)
+            fs.open_at(output_fd, "file.txt/", OpenFlags::CREATE),
+            Err(FsError::NoEntry)
         );
 
         // Invalid descriptor
@@ -1366,6 +1710,11 @@ mod tests {
 
         // Valid names should work
         assert!(fs.open_at(output_fd, "file.txt", OpenFlags::CREATE).is_ok());
+        assert!(fs.open_at(output_fd, "a/b.txt", OpenFlags::CREATE).is_ok());
+        assert!(
+            fs.open_at(output_fd, "./a//./c.txt", OpenFlags::CREATE)
+                .is_ok()
+        );
         assert!(fs.open_at(output_fd, ".hidden", OpenFlags::CREATE).is_ok());
         assert!(
             fs.open_at(output_fd, "file-name_v2.tar.gz", OpenFlags::CREATE)
@@ -1739,6 +2088,32 @@ mod tests {
     }
 
     #[test]
+    fn host_file_helpers_use_the_same_nested_path_policy() {
+        let (mut fs, input, output) = test_fs();
+        host_create_dir(&input, "nested/input");
+        host_create_dir(&output, "nested/output");
+        host_write_input(&input, "nested/input/file.txt", b"input");
+
+        assert_eq!(
+            fs.read_guest_file("/input/./nested/input/file.txt")
+                .unwrap(),
+            b"input"
+        );
+        fs.write_output_path("/output/nested/output/file.txt", b"output".to_vec())
+            .unwrap();
+        assert_eq!(
+            std::fs::read(output.path().join("nested/output/file.txt")).unwrap(),
+            b"output"
+        );
+
+        assert!(fs.read_guest_file("/input/nested/../file.txt").is_err());
+        assert!(
+            fs.write_output_path("/output/nested/../escape.txt", Vec::new())
+                .is_err()
+        );
+    }
+
+    #[test]
     fn read_guest_file_denied_without_read_perm() {
         let output = tempfile::tempdir().unwrap();
         std::fs::write(output.path().join("f.txt"), b"data").unwrap();
@@ -1767,6 +2142,92 @@ mod tests {
         let (fs, _i, _o) = test_fs();
         assert!(fs.read_guest_file("/input/../etc/passwd").is_err());
         assert!(fs.read_guest_file("/input/../../root/.ssh/id_rsa").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_follow_policy_is_explicit_and_capability_scoped() {
+        use std::os::unix::fs::symlink;
+
+        let (mut fs, input, _o) = test_fs();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), b"secret").unwrap();
+        host_create_dir(&input, "src");
+        host_write_input(&input, "src/lib.rs", b"inside");
+        symlink("src/lib.rs", input.path().join("internal-link")).unwrap();
+        symlink(
+            outside.path().join("secret.txt"),
+            input.path().join("external-link"),
+        )
+        .unwrap();
+
+        let input_fd = preopen_fd(&fs, "/input");
+
+        let internal = fs
+            .open_at_with_path_flags(
+                input_fd,
+                "internal-link",
+                PathFlags::SYMLINK_FOLLOW,
+                OpenFlags::OPEN_EXISTING,
+            )
+            .unwrap();
+        assert_eq!(fs.read_file(internal, 0, 100).unwrap().0, b"inside");
+        assert_eq!(
+            fs.stat_at_with_path_flags(input_fd, "internal-link", PathFlags::empty())
+                .unwrap()
+                .descriptor_type,
+            DescriptorType::SymbolicLink
+        );
+        assert_eq!(
+            fs.open_at_with_path_flags(
+                input_fd,
+                "internal-link",
+                PathFlags::empty(),
+                OpenFlags::OPEN_EXISTING,
+            ),
+            Err(FsError::SymlinkLoop)
+        );
+
+        assert!(
+            fs.open_at_with_path_flags(
+                input_fd,
+                "external-link",
+                PathFlags::SYMLINK_FOLLOW,
+                OpenFlags::OPEN_EXISTING,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            fs.stat_at_with_path_flags(input_fd, "external-link", PathFlags::empty())
+                .unwrap()
+                .descriptor_type,
+            DescriptorType::SymbolicLink
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_loops_fail_without_hanging() {
+        use std::os::unix::fs::symlink;
+
+        let (mut fs, input, _o) = test_fs();
+        symlink("second", input.path().join("first")).unwrap();
+        symlink("first", input.path().join("second")).unwrap();
+        let input_fd = preopen_fd(&fs, "/input");
+
+        assert!(
+            fs.open_at_with_path_flags(
+                input_fd,
+                "first",
+                PathFlags::SYMLINK_FOLLOW,
+                OpenFlags::OPEN_EXISTING,
+            )
+            .is_err()
+        );
+        assert!(
+            fs.stat_at_with_path_flags(input_fd, "first", PathFlags::SYMLINK_FOLLOW)
+                .is_err()
+        );
     }
 
     #[test]

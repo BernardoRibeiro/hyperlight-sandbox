@@ -20,6 +20,7 @@ impl From<FsError> for fs_types::ErrorCode {
             FsError::NotPermitted => fs_types::ErrorCode::NotPermitted,
             FsError::NoEntry => fs_types::ErrorCode::NoEntry,
             FsError::InvalidPath => fs_types::ErrorCode::NoEntry,
+            FsError::SymlinkLoop => fs_types::ErrorCode::Loop,
             FsError::Io(_) => fs_types::ErrorCode::Io,
         }
     }
@@ -138,6 +139,9 @@ impl fs_types::Descriptor<wall_clock::Datetime, u32, Resource<Stream>, Resource<
                 hyperlight_sandbox::DescriptorType::RegularFile => {
                     fs_types::DescriptorType::RegularFile
                 }
+                hyperlight_sandbox::DescriptorType::SymbolicLink => {
+                    fs_types::DescriptorType::SymbolicLink
+                }
             })
             .map_err(Into::into)
     }
@@ -219,6 +223,9 @@ impl fs_types::Descriptor<wall_clock::Datetime, u32, Resource<Stream>, Resource<
                     }
                     hyperlight_sandbox::DescriptorType::RegularFile => {
                         fs_types::DescriptorType::RegularFile
+                    }
+                    hyperlight_sandbox::DescriptorType::SymbolicLink => {
+                        fs_types::DescriptorType::SymbolicLink
                     }
                 },
                 r#link_count: 1,
@@ -309,7 +316,11 @@ impl fs_types::Descriptor<wall_clock::Datetime, u32, Resource<Stream>, Resource<
         let Ok(fs) = self.fs.lock() else {
             return Err(fs_types::ErrorCode::Io);
         };
-        fs.stat_at(dir_fd, &path)
+        let mut flags = hyperlight_sandbox::PathFlags::empty();
+        if path_flags.r#symlink_follow {
+            flags |= hyperlight_sandbox::PathFlags::SYMLINK_FOLLOW;
+        }
+        fs.stat_at_with_path_flags(dir_fd, &path, flags)
             .map(|s| fs_types::DescriptorStat {
                 r#type: match s.descriptor_type {
                     hyperlight_sandbox::DescriptorType::Directory => {
@@ -317,6 +328,9 @@ impl fs_types::Descriptor<wall_clock::Datetime, u32, Resource<Stream>, Resource<
                     }
                     hyperlight_sandbox::DescriptorType::RegularFile => {
                         fs_types::DescriptorType::RegularFile
+                    }
+                    hyperlight_sandbox::DescriptorType::SymbolicLink => {
+                        fs_types::DescriptorType::SymbolicLink
                     }
                 },
                 r#link_count: 1,
@@ -370,7 +384,12 @@ impl fs_types::Descriptor<wall_clock::Datetime, u32, Resource<Stream>, Resource<
         if open_flags.r#directory {
             flags |= hyperlight_sandbox::OpenFlags::DIRECTORY;
         }
-        fs.open_at(dir_fd, &path, flags).map_err(Into::into)
+        let mut path_flags_value = hyperlight_sandbox::PathFlags::empty();
+        if path_flags.r#symlink_follow {
+            path_flags_value |= hyperlight_sandbox::PathFlags::SYMLINK_FOLLOW;
+        }
+        fs.open_at_with_path_flags(dir_fd, &path, path_flags_value, flags)
+            .map_err(Into::into)
     }
     fn metadata_hash_at(
         &mut self,
