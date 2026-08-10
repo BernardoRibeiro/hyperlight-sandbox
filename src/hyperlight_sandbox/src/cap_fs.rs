@@ -16,7 +16,7 @@
 //! Snapshots only capture runtime state — input is immutable and output is
 //! ephemeral, so no filesystem state needs to be saved or restored.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -35,12 +35,67 @@ const FIRST_PREOPEN_FD: u32 = 3;
 /// Errors returned by [`CapFs`] operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsError {
+    Access,
     BadDescriptor,
+    Busy,
+    CrossDevice,
+    Deadlock,
+    Exist,
+    FileTooLarge,
+    InsufficientMemory,
+    InsufficientSpace,
+    Interrupted,
     NotPermitted,
     NoEntry,
+    NotDirectory,
+    IsDirectory,
+    NotEmpty,
+    NameTooLong,
+    Overflow,
+    Quota,
+    ReadOnly,
+    InvalidSeek,
+    TextFileBusy,
+    TooManyLinks,
+    Unsupported,
+    WouldBlock,
     InvalidPath,
     SymlinkLoop,
     Io(String),
+}
+
+impl FsError {
+    /// Preserve the portable part of an operating-system I/O failure so the
+    /// WASI adapter can return a specific `error-code` instead of generic I/O.
+    fn from_io(error: std::io::Error) -> Self {
+        use std::io::ErrorKind;
+
+        match error.kind() {
+            ErrorKind::NotFound => Self::NoEntry,
+            ErrorKind::PermissionDenied => Self::Access,
+            ErrorKind::AlreadyExists => Self::Exist,
+            ErrorKind::WouldBlock => Self::WouldBlock,
+            ErrorKind::NotADirectory => Self::NotDirectory,
+            ErrorKind::IsADirectory => Self::IsDirectory,
+            ErrorKind::DirectoryNotEmpty => Self::NotEmpty,
+            ErrorKind::ReadOnlyFilesystem => Self::ReadOnly,
+            ErrorKind::InvalidInput | ErrorKind::InvalidData => Self::InvalidPath,
+            ErrorKind::StorageFull => Self::InsufficientSpace,
+            ErrorKind::NotSeekable => Self::InvalidSeek,
+            ErrorKind::QuotaExceeded => Self::Quota,
+            ErrorKind::FileTooLarge => Self::FileTooLarge,
+            ErrorKind::ResourceBusy => Self::Busy,
+            ErrorKind::ExecutableFileBusy => Self::TextFileBusy,
+            ErrorKind::Deadlock => Self::Deadlock,
+            ErrorKind::CrossesDevices => Self::CrossDevice,
+            ErrorKind::TooManyLinks => Self::TooManyLinks,
+            ErrorKind::InvalidFilename | ErrorKind::ArgumentListTooLong => Self::NameTooLong,
+            ErrorKind::Interrupted => Self::Interrupted,
+            ErrorKind::Unsupported => Self::Unsupported,
+            ErrorKind::OutOfMemory => Self::InsufficientMemory,
+            _ => Self::Io(error.to_string()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +316,10 @@ impl GuestRelativePath {
 
     fn as_path(&self) -> &Path {
         Path::new(&self.normalized)
+    }
+
+    fn is_within(&self, ancestor: &Self) -> bool {
+        self.as_path().strip_prefix(ancestor.as_path()).is_ok()
     }
 }
 
@@ -685,7 +744,7 @@ impl CapFs {
             dir.cap_std()
                 .symlink_metadata(resolved.dir_relative.as_path())
         }
-        .map_err(|_| FsError::NoEntry)?;
+        .map_err(FsError::from_io)?;
 
         if resolved.dir_relative.requires_directory && !metadata.is_dir() {
             return Err(FsError::InvalidPath);
@@ -765,12 +824,16 @@ impl CapFs {
         }
 
         let follow_symlinks = path_flags.contains(PathFlags::SYMLINK_FOLLOW);
-        let metadata = if follow_symlinks {
+        let metadata_result = if follow_symlinks {
             dir.cap_std().metadata(dir_relative)
         } else {
             dir.cap_std().symlink_metadata(dir_relative)
-        }
-        .ok();
+        };
+        let metadata = match metadata_result {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(FsError::from_io(error)),
+        };
         let exists = metadata.is_some();
         if !exists && !create {
             return Err(FsError::NoEntry);
@@ -800,7 +863,7 @@ impl CapFs {
         if !exists || truncate {
             dir.cap_std()
                 .create(dir_relative)
-                .map_err(|e| FsError::Io(e.to_string()))?;
+                .map_err(FsError::from_io)?;
         }
 
         let metadata = if follow_symlinks {
@@ -808,7 +871,7 @@ impl CapFs {
         } else {
             dir.cap_std().symlink_metadata(dir_relative)
         }
-        .map_err(|e| FsError::Io(e.to_string()))?;
+        .map_err(FsError::from_io)?;
         if !follow_symlinks && metadata.file_type().is_symlink() {
             return Err(FsError::SymlinkLoop);
         }
@@ -821,7 +884,7 @@ impl CapFs {
             let opened = dir
                 .cap_std()
                 .open_dir(dir_relative)
-                .map_err(|e| FsError::Io(e.to_string()))?;
+                .map_err(FsError::from_io)?;
             Some(Dir::new(opened, dir.perms(), dir.file_perms()))
         } else {
             None
@@ -840,6 +903,129 @@ impl CapFs {
             },
         );
         Ok(fd)
+    }
+
+    /// Create one directory relative to an opened directory descriptor.
+    ///
+    /// This is intentionally non-recursive: every parent component must
+    /// already exist, matching WASI `create-directory-at` semantics.
+    pub fn create_directory_at(&mut self, dir_fd: u32, path: &str) -> Result<(), FsError> {
+        let resolved = self.resolve_at(dir_fd, path)?;
+        let dir = self.mutating_dir(dir_fd)?;
+        dir.cap_std()
+            .create_dir(resolved.dir_relative.as_path())
+            .map_err(FsError::from_io)
+    }
+
+    /// Remove an empty directory relative to an opened directory descriptor.
+    pub fn remove_directory_at(&mut self, dir_fd: u32, path: &str) -> Result<(), FsError> {
+        let resolved = self.resolve_at(dir_fd, path)?;
+        let dir = self.mutating_dir(dir_fd)?;
+        dir.cap_std()
+            .remove_dir(resolved.dir_relative.as_path())
+            .map_err(FsError::from_io)?;
+
+        let invalidated = self.descriptors_in_subtree(resolved.root_fd, &resolved.root_relative);
+        self.invalidate_descriptors(&invalidated);
+        Ok(())
+    }
+
+    /// Unlink a non-directory entry without following the final symlink.
+    pub fn unlink_file_at(&mut self, dir_fd: u32, path: &str) -> Result<(), FsError> {
+        let resolved = self.resolve_at(dir_fd, path)?;
+        let dir = self.mutating_dir(dir_fd)?;
+
+        // Normalization removes a trailing slash, so retain its directory
+        // requirement explicitly instead of accidentally unlinking `file/`.
+        if resolved.dir_relative.requires_directory {
+            let metadata = dir
+                .cap_std()
+                .symlink_metadata(resolved.dir_relative.as_path())
+                .map_err(FsError::from_io)?;
+            return if metadata.is_dir() {
+                Err(FsError::IsDirectory)
+            } else {
+                Err(FsError::NotDirectory)
+            };
+        }
+
+        dir.cap_std()
+            .remove_file(resolved.dir_relative.as_path())
+            .map_err(FsError::from_io)?;
+
+        let invalidated = self.descriptors_in_subtree(resolved.root_fd, &resolved.root_relative);
+        self.invalidate_descriptors(&invalidated);
+        Ok(())
+    }
+
+    /// Rename a file, symlink, or directory between two opened directories.
+    ///
+    /// Both descriptors must grant directory mutation rights. Renames may
+    /// cross opened directory descriptors within one preopen, but never cross
+    /// preopen capability roots. This avoids transferring path-backed open
+    /// descriptors into a capability with different rights.
+    pub fn rename_at(
+        &mut self,
+        old_dir_fd: u32,
+        old_path: &str,
+        new_dir_fd: u32,
+        new_path: &str,
+    ) -> Result<(), FsError> {
+        let old_resolved = self.resolve_at(old_dir_fd, old_path)?;
+        let new_resolved = self.resolve_at(new_dir_fd, new_path)?;
+        let old_dir = self.mutating_dir(old_dir_fd)?;
+        let new_dir = self.mutating_dir(new_dir_fd)?;
+
+        if old_resolved.root_fd != new_resolved.root_fd {
+            return Err(FsError::CrossDevice);
+        }
+
+        let old_metadata = old_dir
+            .cap_std()
+            .symlink_metadata(old_resolved.dir_relative.as_path())
+            .map_err(FsError::from_io)?;
+        if old_resolved.dir_relative.requires_directory && !old_metadata.is_dir() {
+            return Err(FsError::NotDirectory);
+        }
+        if new_resolved.dir_relative.requires_directory {
+            let new_metadata = new_dir
+                .cap_std()
+                .symlink_metadata(new_resolved.dir_relative.as_path())
+                .map_err(FsError::from_io)?;
+            if !new_metadata.is_dir() {
+                return Err(FsError::NotDirectory);
+            }
+        }
+
+        let same_path =
+            old_resolved.root_relative.as_path() == new_resolved.root_relative.as_path();
+        let moved = self.descriptors_in_subtree(old_resolved.root_fd, &old_resolved.root_relative);
+        let replaced =
+            self.descriptors_in_subtree(new_resolved.root_fd, &new_resolved.root_relative);
+
+        old_dir
+            .cap_std()
+            .rename(
+                old_resolved.dir_relative.as_path(),
+                new_dir.cap_std(),
+                new_resolved.dir_relative.as_path(),
+            )
+            .map_err(FsError::from_io)?;
+
+        if same_path {
+            return Ok(());
+        }
+
+        // CapFs file descriptors are path-backed rather than open host file
+        // handles. Keeping them alive after a namespace mutation could make a
+        // descriptor refer to a different object, particularly when the tree
+        // contains relative symlinks or pre-existing hard links. Use one
+        // simple documented policy: a successful rename invalidates every
+        // non-preopen descriptor and stream rooted at either the old or the
+        // replaced destination path. The guest must reopen the new path.
+        let invalidated = moved.union(&replaced).copied().collect::<HashSet<_>>();
+        self.invalidate_descriptors(&invalidated);
+        Ok(())
     }
 
     /// Close an opened descendant descriptor and any streams derived from it.
@@ -884,14 +1070,8 @@ impl CapFs {
         if !root.file_perms().contains(FilePerms::READ) {
             return Err(FsError::NotPermitted);
         }
-        let mut file = root
-            .cap_std()
-            .open(path)
-            .map_err(|e| FsError::Io(e.to_string()))?;
-        let file_size = file
-            .metadata()
-            .map_err(|e| FsError::Io(e.to_string()))?
-            .len();
+        let mut file = root.cap_std().open(path).map_err(FsError::from_io)?;
+        let file_size = file.metadata().map_err(FsError::from_io)?.len();
 
         let start = offset.min(file_size);
         let remaining = file_size - start;
@@ -900,11 +1080,9 @@ impl CapFs {
             return Ok((Vec::new(), true));
         }
         file.seek(SeekFrom::Start(start))
-            .map_err(|e| FsError::Io(e.to_string()))?;
+            .map_err(FsError::from_io)?;
         let mut buf = vec![0u8; to_read];
-        let n = file
-            .read(&mut buf)
-            .map_err(|e| FsError::Io(e.to_string()))?;
+        let n = file.read(&mut buf).map_err(FsError::from_io)?;
         buf.truncate(n);
         let eof = start + n as u64 >= file_size;
         Ok((buf, eof))
@@ -920,23 +1098,18 @@ impl CapFs {
         let mut file = root
             .cap_std()
             .open_with(path, &opts)
-            .map_err(|e| FsError::Io(e.to_string()))?;
+            .map_err(FsError::from_io)?;
 
-        let file_size = file
-            .metadata()
-            .map_err(|e| FsError::Io(e.to_string()))?
-            .len();
+        let file_size = file.metadata().map_err(FsError::from_io)?.len();
         let new_end = offset
             .checked_add(buffer.len() as u64)
-            .ok_or(FsError::Io("integer overflow".into()))?;
+            .ok_or(FsError::Overflow)?;
         if new_end > file_size {
-            file.set_len(new_end)
-                .map_err(|e| FsError::Io(e.to_string()))?;
+            file.set_len(new_end).map_err(FsError::from_io)?;
         }
         file.seek(SeekFrom::Start(offset))
-            .map_err(|e| FsError::Io(e.to_string()))?;
-        file.write_all(buffer)
-            .map_err(|e| FsError::Io(e.to_string()))?;
+            .map_err(FsError::from_io)?;
+        file.write_all(buffer).map_err(FsError::from_io)?;
         Ok(buffer.len() as u64)
     }
 
@@ -993,25 +1166,17 @@ impl CapFs {
         let offset = stream.offset;
 
         let (root, path) = self.file_parts(file_fd)?;
-        let mut file = root
-            .cap_std()
-            .open(path)
-            .map_err(|e| FsError::Io(e.to_string()))?;
-        let file_size = file
-            .metadata()
-            .map_err(|e| FsError::Io(e.to_string()))?
-            .len();
+        let mut file = root.cap_std().open(path).map_err(FsError::from_io)?;
+        let file_size = file.metadata().map_err(FsError::from_io)?.len();
         if offset >= file_size {
             return Err(FsError::Io("stream read past end of file".into()));
         }
         file.seek(SeekFrom::Start(offset))
-            .map_err(|e| FsError::Io(e.to_string()))?;
+            .map_err(FsError::from_io)?;
         let remaining = file_size - offset;
         let to_read = len.min(remaining).min(Self::MAX_READ_BYTES as u64) as usize;
         let mut buf = vec![0u8; to_read];
-        let n = file
-            .read(&mut buf)
-            .map_err(|e| FsError::Io(e.to_string()))?;
+        let n = file.read(&mut buf).map_err(FsError::from_io)?;
         buf.truncate(n);
 
         if buf.is_empty() {
@@ -1105,6 +1270,37 @@ impl CapFs {
     // -----------------------------------------------------------------------
     // Internals
     // -----------------------------------------------------------------------
+
+    fn mutating_dir(&self, fd: u32) -> Result<Dir, FsError> {
+        let dir = self.get_dir(fd).cloned().ok_or(FsError::BadDescriptor)?;
+        if !dir.perms().contains(DirPerms::MUTATE) {
+            return Err(FsError::NotPermitted);
+        }
+        Ok(dir)
+    }
+
+    fn descriptors_in_subtree(&self, root_fd: u32, path: &GuestRelativePath) -> HashSet<u32> {
+        self.descriptors
+            .iter()
+            .filter_map(|(&fd, entry)| {
+                (!entry.is_preopen
+                    && entry.root_fd == root_fd
+                    && entry.relative_path.is_within(path))
+                .then_some(fd)
+            })
+            .collect()
+    }
+
+    fn invalidate_descriptors(&mut self, descriptors: &HashSet<u32>) {
+        if descriptors.is_empty() {
+            return;
+        }
+        self.descriptors.retain(|fd, _| !descriptors.contains(fd));
+        self.streams
+            .retain(|_, stream| !descriptors.contains(&stream.file_fd));
+        self.dir_streams
+            .retain(|_, stream| !descriptors.contains(&stream.dir_fd));
+    }
 
     fn register_preopen(&mut self, dir: Dir, guest_path: &str) -> Result<u32, FsError> {
         let fd = self.alloc_handle()?;
@@ -2268,6 +2464,453 @@ mod tests {
             fs.write_output_path("/output/../etc/passwd", b"data".to_vec())
                 .is_err()
         );
+    }
+
+    // ── Filesystem mutation tests ───────────────────────────────────
+
+    #[test]
+    fn create_directory_at_supports_nested_validated_paths() {
+        let (mut fs, _input, output) = test_fs();
+        let output_fd = preopen_fd(&fs, "/output");
+
+        fs.create_directory_at(output_fd, "build").unwrap();
+        fs.create_directory_at(output_fd, "./build//cache/")
+            .unwrap();
+
+        assert!(output.path().join("build/cache").is_dir());
+        assert_eq!(
+            fs.stat_at(output_fd, "build/cache")
+                .unwrap()
+                .descriptor_type,
+            DescriptorType::Directory
+        );
+        assert_eq!(
+            fs.create_directory_at(output_fd, "build/cache"),
+            Err(FsError::Exist)
+        );
+        assert_eq!(
+            fs.create_directory_at(output_fd, "missing/child"),
+            Err(FsError::NoEntry)
+        );
+        assert_eq!(
+            fs.create_directory_at(output_fd, "../escape"),
+            Err(FsError::InvalidPath)
+        );
+    }
+
+    #[test]
+    fn mutations_require_directory_mutation_rights() {
+        let (mut fs, input, output) = test_fs();
+        host_create_dir(&input, "dir");
+        host_write_input(&input, "file.txt", b"input");
+        host_write_output(&output, "output.txt", b"output");
+        let input_fd = preopen_fd(&fs, "/input");
+        let output_fd = preopen_fd(&fs, "/output");
+
+        assert_eq!(
+            fs.create_directory_at(input_fd, "created"),
+            Err(FsError::NotPermitted)
+        );
+        assert_eq!(
+            fs.unlink_file_at(input_fd, "file.txt"),
+            Err(FsError::NotPermitted)
+        );
+        assert_eq!(
+            fs.remove_directory_at(input_fd, "dir"),
+            Err(FsError::NotPermitted)
+        );
+        assert_eq!(
+            fs.rename_at(input_fd, "file.txt", output_fd, "moved.txt"),
+            Err(FsError::NotPermitted)
+        );
+        assert_eq!(
+            fs.rename_at(output_fd, "output.txt", input_fd, "moved.txt"),
+            Err(FsError::NotPermitted)
+        );
+        assert!(input.path().join("file.txt").is_file());
+        assert!(output.path().join("output.txt").is_file());
+    }
+
+    #[test]
+    fn unlink_file_at_invalidates_open_descriptors_and_streams() {
+        let (mut fs, _input, output) = test_fs();
+        let output_fd = preopen_fd(&fs, "/output");
+        host_write_output(&output, "delete.txt", b"contents");
+        let first = fs
+            .open_at(output_fd, "delete.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+        let second = fs
+            .open_at(output_fd, "delete.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+        let stream = fs.create_read_stream(first, 0).unwrap();
+
+        fs.unlink_file_at(output_fd, "delete.txt").unwrap();
+
+        assert!(!output.path().join("delete.txt").exists());
+        assert_eq!(fs.get_type(first), Err(FsError::BadDescriptor));
+        assert_eq!(fs.get_type(second), Err(FsError::BadDescriptor));
+        assert_eq!(fs.stream_read(stream, 1), Err(FsError::BadDescriptor));
+        assert_eq!(
+            fs.unlink_file_at(output_fd, "delete.txt"),
+            Err(FsError::NoEntry)
+        );
+    }
+
+    #[test]
+    fn unlink_file_at_rejects_directories_and_trailing_slashes() {
+        let (mut fs, _input, output) = test_fs();
+        let output_fd = preopen_fd(&fs, "/output");
+        host_create_dir(&output, "dir");
+        host_write_output(&output, "file.txt", b"contents");
+
+        assert_eq!(
+            fs.unlink_file_at(output_fd, "dir"),
+            Err(FsError::IsDirectory)
+        );
+        assert_eq!(
+            fs.unlink_file_at(output_fd, "dir/"),
+            Err(FsError::IsDirectory)
+        );
+        assert_eq!(
+            fs.unlink_file_at(output_fd, "file.txt/"),
+            Err(FsError::NotDirectory)
+        );
+        assert!(output.path().join("file.txt").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unlink_file_at_removes_a_symlink_without_touching_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let (mut fs, _input, output) = test_fs();
+        let output_fd = preopen_fd(&fs, "/output");
+        host_write_output(&output, "target.txt", b"target");
+        symlink("target.txt", output.path().join("link.txt")).unwrap();
+
+        fs.unlink_file_at(output_fd, "link.txt").unwrap();
+
+        assert!(!output.path().join("link.txt").exists());
+        assert_eq!(
+            std::fs::read(output.path().join("target.txt")).unwrap(),
+            b"target"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mutation_trailing_slash_does_not_follow_a_final_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let (mut fs, _input, output) = test_fs();
+        let output_fd = preopen_fd(&fs, "/output");
+        host_create_dir(&output, "target");
+        host_create_dir(&output, "source");
+        symlink("target", output.path().join("link")).unwrap();
+
+        assert_eq!(
+            fs.unlink_file_at(output_fd, "link/"),
+            Err(FsError::NotDirectory)
+        );
+        assert_eq!(
+            fs.rename_at(output_fd, "source", output_fd, "link/"),
+            Err(FsError::NotDirectory)
+        );
+        assert!(
+            std::fs::symlink_metadata(output.path().join("link"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(output.path().join("source").is_dir());
+        assert!(output.path().join("target").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mutations_cannot_traverse_an_external_directory_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let (mut fs, _input, output) = test_fs();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("sentinel.txt"), b"outside").unwrap();
+        symlink(outside.path(), output.path().join("outside-link")).unwrap();
+        let output_fd = preopen_fd(&fs, "/output");
+
+        assert!(
+            fs.create_directory_at(output_fd, "outside-link/created")
+                .is_err()
+        );
+        assert!(
+            fs.unlink_file_at(output_fd, "outside-link/sentinel.txt")
+                .is_err()
+        );
+        assert!(
+            fs.rename_at(
+                output_fd,
+                "outside-link/sentinel.txt",
+                output_fd,
+                "moved.txt",
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read(outside.path().join("sentinel.txt")).unwrap(),
+            b"outside"
+        );
+        assert!(!outside.path().join("created").exists());
+        assert!(!output.path().join("moved.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_at_moves_a_symlink_and_invalidates_followed_descriptors() {
+        use std::os::unix::fs::symlink;
+
+        let (mut fs, _input, output) = test_fs();
+        let output_fd = preopen_fd(&fs, "/output");
+        host_write_output(&output, "target.txt", b"target");
+        symlink("target.txt", output.path().join("old-link")).unwrap();
+        let followed_fd = fs
+            .open_at(output_fd, "old-link", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+
+        fs.rename_at(output_fd, "old-link", output_fd, "new-link")
+            .unwrap();
+
+        assert_eq!(fs.get_type(followed_fd), Err(FsError::BadDescriptor));
+        assert!(
+            std::fs::symlink_metadata(output.path().join("new-link"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read(output.path().join("new-link")).unwrap(),
+            b"target"
+        );
+    }
+
+    #[test]
+    fn remove_directory_at_requires_an_empty_directory_and_invalidates_handles() {
+        let (mut fs, _input, output) = test_fs();
+        let output_fd = preopen_fd(&fs, "/output");
+        host_create_dir(&output, "empty");
+        host_create_dir(&output, "nonempty");
+        host_write_output(&output, "nonempty/file.txt", b"contents");
+        host_write_output(&output, "file.txt", b"contents");
+        let empty_fd = fs
+            .open_at(output_fd, "empty", OpenFlags::DIRECTORY)
+            .unwrap();
+        let dir_stream = fs.create_dir_stream(empty_fd).unwrap();
+
+        assert_eq!(
+            fs.remove_directory_at(output_fd, "nonempty"),
+            Err(FsError::NotEmpty)
+        );
+        assert_eq!(
+            fs.remove_directory_at(output_fd, "file.txt"),
+            Err(FsError::NotDirectory)
+        );
+        fs.remove_directory_at(output_fd, "empty").unwrap();
+
+        assert!(!output.path().join("empty").exists());
+        assert_eq!(fs.get_type(empty_fd), Err(FsError::BadDescriptor));
+        assert!(!fs.has_dir_stream(dir_stream));
+    }
+
+    #[test]
+    fn rename_at_invalidates_open_source_descriptors_and_streams() {
+        let (mut fs, _input, output) = test_fs();
+        let output_fd = preopen_fd(&fs, "/output");
+        host_write_output(&output, "old.txt", b"contents");
+        let file_fd = fs
+            .open_at(output_fd, "old.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+        let stream = fs.create_read_stream(file_fd, 0).unwrap();
+
+        fs.rename_at(output_fd, "old.txt", output_fd, "new.txt")
+            .unwrap();
+
+        assert!(!output.path().join("old.txt").exists());
+        assert_eq!(
+            std::fs::read(output.path().join("new.txt")).unwrap(),
+            b"contents"
+        );
+        assert_eq!(fs.get_type(file_fd), Err(FsError::BadDescriptor));
+        assert_eq!(fs.stream_read(stream, 4), Err(FsError::BadDescriptor));
+        let reopened = fs
+            .open_at(output_fd, "new.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+        assert_eq!(fs.read_file(reopened, 0, 100).unwrap().0, b"contents");
+    }
+
+    #[test]
+    fn rename_at_same_path_is_a_noop_and_preserves_descriptors() {
+        let (mut fs, _input, output) = test_fs();
+        let output_fd = preopen_fd(&fs, "/output");
+        host_write_output(&output, "same.txt", b"contents");
+        let file_fd = fs
+            .open_at(output_fd, "same.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+        let stream = fs.create_read_stream(file_fd, 0).unwrap();
+
+        fs.rename_at(output_fd, "same.txt", output_fd, "./same.txt")
+            .unwrap();
+
+        assert_eq!(fs.get_type(file_fd), Ok(DescriptorType::RegularFile));
+        assert_eq!(fs.stream_read(stream, 4).unwrap(), b"cont");
+    }
+
+    #[test]
+    fn rename_at_invalidates_an_open_directory_subtree() {
+        let (mut fs, _input, output) = test_fs();
+        let output_fd = preopen_fd(&fs, "/output");
+        host_create_dir(&output, "build/cache");
+        host_write_output(&output, "build/cache/result.txt", b"result");
+        let build_fd = fs
+            .open_at(output_fd, "build", OpenFlags::DIRECTORY)
+            .unwrap();
+        let file_fd = fs
+            .open_at(build_fd, "cache/result.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+
+        fs.rename_at(output_fd, "build", output_fd, "archive")
+            .unwrap();
+
+        assert_eq!(fs.get_type(build_fd), Err(FsError::BadDescriptor));
+        assert_eq!(fs.get_type(file_fd), Err(FsError::BadDescriptor));
+        assert_eq!(
+            fs.stat_at(output_fd, "archive/cache/result.txt")
+                .unwrap()
+                .descriptor_type,
+            DescriptorType::RegularFile
+        );
+    }
+
+    #[test]
+    fn rename_at_works_between_open_directories_in_the_same_root() {
+        let (mut fs, _input, output) = test_fs();
+        let output_fd = preopen_fd(&fs, "/output");
+        host_create_dir(&output, "from");
+        host_create_dir(&output, "to");
+        host_write_output(&output, "from/file.txt", b"contents");
+        let from_fd = fs.open_at(output_fd, "from", OpenFlags::DIRECTORY).unwrap();
+        let to_fd = fs.open_at(output_fd, "to", OpenFlags::DIRECTORY).unwrap();
+        let file_fd = fs
+            .open_at(from_fd, "file.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+
+        fs.rename_at(from_fd, "file.txt", to_fd, "moved.txt")
+            .unwrap();
+
+        assert_eq!(fs.get_type(file_fd), Err(FsError::BadDescriptor));
+        assert_eq!(fs.file_dir_fd(file_fd), None);
+        assert!(output.path().join("to/moved.txt").is_file());
+    }
+
+    #[test]
+    fn rename_at_invalidates_descriptors_for_a_replaced_destination() {
+        let (mut fs, _input, output) = test_fs();
+        let output_fd = preopen_fd(&fs, "/output");
+        host_write_output(&output, "source.txt", b"source");
+        host_write_output(&output, "destination.txt", b"destination");
+        let source_fd = fs
+            .open_at(output_fd, "source.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+        let destination_fd = fs
+            .open_at(output_fd, "destination.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+        let destination_stream = fs.create_read_stream(destination_fd, 0).unwrap();
+
+        fs.rename_at(output_fd, "source.txt", output_fd, "destination.txt")
+            .unwrap();
+
+        assert_eq!(fs.get_type(source_fd), Err(FsError::BadDescriptor));
+        assert_eq!(fs.get_type(destination_fd), Err(FsError::BadDescriptor));
+        assert_eq!(
+            fs.stream_read(destination_stream, 1),
+            Err(FsError::BadDescriptor)
+        );
+    }
+
+    #[test]
+    fn rename_at_rejects_cross_capability_root_moves() {
+        let (mut fs, _input, output) = test_fs();
+        let other = tempfile::tempdir().unwrap();
+        host_write_output(&output, "file.txt", b"contents");
+        let other_cap = CapDir::open_ambient_dir(other.path(), ambient_authority()).unwrap();
+        let other_fd = fs
+            .register_preopen(
+                Dir::new(
+                    other_cap,
+                    DirPerms::READ | DirPerms::MUTATE,
+                    FilePerms::READ | FilePerms::WRITE,
+                ),
+                "/other",
+            )
+            .unwrap();
+        let output_fd = preopen_fd(&fs, "/output");
+
+        assert_eq!(
+            fs.rename_at(output_fd, "file.txt", other_fd, "file.txt"),
+            Err(FsError::CrossDevice)
+        );
+        assert!(output.path().join("file.txt").is_file());
+        assert!(!other.path().join("file.txt").exists());
+    }
+
+    #[test]
+    fn filesystem_mutations_reject_unsafe_paths_and_bad_descriptors() {
+        let (mut fs, _input, _output) = test_fs();
+        let output_fd = preopen_fd(&fs, "/output");
+
+        assert_eq!(
+            fs.unlink_file_at(output_fd, "../escape"),
+            Err(FsError::InvalidPath)
+        );
+        assert_eq!(
+            fs.remove_directory_at(output_fd, "/absolute"),
+            Err(FsError::InvalidPath)
+        );
+        assert_eq!(
+            fs.rename_at(output_fd, "old", output_fd, "../../new"),
+            Err(FsError::InvalidPath)
+        );
+        assert_eq!(
+            fs.create_directory_at(999, "dir"),
+            Err(FsError::BadDescriptor)
+        );
+        assert_eq!(
+            fs.remove_directory_at(output_fd, "."),
+            Err(FsError::InvalidPath)
+        );
+        assert_eq!(
+            fs.rename_at(output_fd, ".", output_fd, "renamed-root"),
+            Err(FsError::InvalidPath)
+        );
+    }
+
+    #[test]
+    fn io_errors_are_classified_for_wasi() {
+        use std::io::ErrorKind;
+
+        let cases = [
+            (ErrorKind::NotFound, FsError::NoEntry),
+            (ErrorKind::PermissionDenied, FsError::Access),
+            (ErrorKind::AlreadyExists, FsError::Exist),
+            (ErrorKind::NotADirectory, FsError::NotDirectory),
+            (ErrorKind::IsADirectory, FsError::IsDirectory),
+            (ErrorKind::DirectoryNotEmpty, FsError::NotEmpty),
+            (ErrorKind::ReadOnlyFilesystem, FsError::ReadOnly),
+            (ErrorKind::StorageFull, FsError::InsufficientSpace),
+            (ErrorKind::QuotaExceeded, FsError::Quota),
+            (ErrorKind::CrossesDevices, FsError::CrossDevice),
+        ];
+
+        for (kind, expected) in cases {
+            assert_eq!(FsError::from_io(std::io::Error::from(kind)), expected);
+        }
     }
 
     // ── Directory stream tests ──────────────────────────────────────

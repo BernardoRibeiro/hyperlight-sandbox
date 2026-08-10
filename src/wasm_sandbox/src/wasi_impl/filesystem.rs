@@ -16,12 +16,33 @@ type HlResult<T> = T;
 impl From<FsError> for fs_types::ErrorCode {
     fn from(e: FsError) -> Self {
         match e {
+            FsError::Access => fs_types::ErrorCode::Access,
             FsError::BadDescriptor => fs_types::ErrorCode::BadDescriptor,
-            FsError::NotPermitted => fs_types::ErrorCode::NotPermitted,
-            FsError::NoEntry => fs_types::ErrorCode::NoEntry,
-            FsError::InvalidPath => fs_types::ErrorCode::NoEntry,
-            FsError::SymlinkLoop => fs_types::ErrorCode::Loop,
+            FsError::Busy => fs_types::ErrorCode::Busy,
+            FsError::CrossDevice => fs_types::ErrorCode::CrossDevice,
+            FsError::Deadlock => fs_types::ErrorCode::Deadlock,
+            FsError::Exist => fs_types::ErrorCode::Exist,
+            FsError::FileTooLarge => fs_types::ErrorCode::FileTooLarge,
+            FsError::InsufficientMemory => fs_types::ErrorCode::InsufficientMemory,
+            FsError::InsufficientSpace => fs_types::ErrorCode::InsufficientSpace,
+            FsError::Interrupted => fs_types::ErrorCode::Interrupted,
+            FsError::InvalidPath => fs_types::ErrorCode::Invalid,
+            FsError::InvalidSeek => fs_types::ErrorCode::InvalidSeek,
             FsError::Io(_) => fs_types::ErrorCode::Io,
+            FsError::IsDirectory => fs_types::ErrorCode::IsDirectory,
+            FsError::NameTooLong => fs_types::ErrorCode::NameTooLong,
+            FsError::NoEntry => fs_types::ErrorCode::NoEntry,
+            FsError::NotDirectory => fs_types::ErrorCode::NotDirectory,
+            FsError::NotEmpty => fs_types::ErrorCode::NotEmpty,
+            FsError::NotPermitted => fs_types::ErrorCode::NotPermitted,
+            FsError::Overflow => fs_types::ErrorCode::Overflow,
+            FsError::Quota => fs_types::ErrorCode::Quota,
+            FsError::ReadOnly => fs_types::ErrorCode::ReadOnly,
+            FsError::SymlinkLoop => fs_types::ErrorCode::Loop,
+            FsError::TextFileBusy => fs_types::ErrorCode::TextFileBusy,
+            FsError::TooManyLinks => fs_types::ErrorCode::TooManyLinks,
+            FsError::Unsupported => fs_types::ErrorCode::Unsupported,
+            FsError::WouldBlock => fs_types::ErrorCode::WouldBlock,
         }
     }
 }
@@ -205,7 +226,11 @@ impl fs_types::Descriptor<wall_clock::Datetime, u32, Resource<Stream>, Resource<
         self_: BorrowedResourceGuard<u32>,
         path: String,
     ) -> HlResult<Result<(), fs_types::ErrorCode>> {
-        Err(fs_types::ErrorCode::Unsupported)
+        let dir_fd = *self_;
+        let Ok(mut fs) = self.fs.lock() else {
+            return Err(fs_types::ErrorCode::Io);
+        };
+        fs.create_directory_at(dir_fd, &path).map_err(Into::into)
     }
     fn stat(
         &mut self,
@@ -248,7 +273,11 @@ impl fs_types::Descriptor<wall_clock::Datetime, u32, Resource<Stream>, Resource<
         self_: BorrowedResourceGuard<u32>,
         path: String,
     ) -> HlResult<Result<(), fs_types::ErrorCode>> {
-        Err(fs_types::ErrorCode::Unsupported)
+        let dir_fd = *self_;
+        let Ok(mut fs) = self.fs.lock() else {
+            return Err(fs_types::ErrorCode::Io);
+        };
+        fs.remove_directory_at(dir_fd, &path).map_err(Into::into)
     }
     fn rename_at(
         &mut self,
@@ -257,7 +286,13 @@ impl fs_types::Descriptor<wall_clock::Datetime, u32, Resource<Stream>, Resource<
         new_descriptor: BorrowedResourceGuard<u32>,
         new_path: String,
     ) -> HlResult<Result<(), fs_types::ErrorCode>> {
-        Err(fs_types::ErrorCode::Unsupported)
+        let old_dir_fd = *self_;
+        let new_dir_fd = *new_descriptor;
+        let Ok(mut fs) = self.fs.lock() else {
+            return Err(fs_types::ErrorCode::Io);
+        };
+        fs.rename_at(old_dir_fd, &old_path, new_dir_fd, &new_path)
+            .map_err(Into::into)
     }
     fn symlink_at(
         &mut self,
@@ -272,7 +307,11 @@ impl fs_types::Descriptor<wall_clock::Datetime, u32, Resource<Stream>, Resource<
         self_: BorrowedResourceGuard<u32>,
         path: String,
     ) -> HlResult<Result<(), fs_types::ErrorCode>> {
-        Err(fs_types::ErrorCode::Unsupported)
+        let dir_fd = *self_;
+        let Ok(mut fs) = self.fs.lock() else {
+            return Err(fs_types::ErrorCode::Io);
+        };
+        fs.unlink_file_at(dir_fd, &path).map_err(Into::into)
     }
     fn is_same_object(
         &mut self,
@@ -316,9 +355,9 @@ impl fs_types::Descriptor<wall_clock::Datetime, u32, Resource<Stream>, Resource<
         let Ok(fs) = self.fs.lock() else {
             return Err(fs_types::ErrorCode::Io);
         };
-        let mut flags = hyperlight_sandbox::PathFlags::empty();
+        let mut flags = hyperlight_sandbox::cap_fs::PathFlags::empty();
         if path_flags.r#symlink_follow {
-            flags |= hyperlight_sandbox::PathFlags::SYMLINK_FOLLOW;
+            flags |= hyperlight_sandbox::cap_fs::PathFlags::SYMLINK_FOLLOW;
         }
         fs.stat_at_with_path_flags(dir_fd, &path, flags)
             .map(|s| fs_types::DescriptorStat {
@@ -384,9 +423,9 @@ impl fs_types::Descriptor<wall_clock::Datetime, u32, Resource<Stream>, Resource<
         if open_flags.r#directory {
             flags |= hyperlight_sandbox::OpenFlags::DIRECTORY;
         }
-        let mut path_flags_value = hyperlight_sandbox::PathFlags::empty();
+        let mut path_flags_value = hyperlight_sandbox::cap_fs::PathFlags::empty();
         if path_flags.r#symlink_follow {
-            path_flags_value |= hyperlight_sandbox::PathFlags::SYMLINK_FOLLOW;
+            path_flags_value |= hyperlight_sandbox::cap_fs::PathFlags::SYMLINK_FOLLOW;
         }
         fs.open_at_with_path_flags(dir_fd, &path, path_flags_value, flags)
             .map_err(Into::into)
@@ -422,5 +461,32 @@ impl wasi::filesystem::Preopens<u32> for HostState {
             .into_iter()
             .map(|(fd, name)| (fd, name.to_string()))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cap_fs_errors_map_to_specific_wasi_codes() {
+        let cases = [
+            (FsError::Access, fs_types::ErrorCode::Access),
+            (FsError::CrossDevice, fs_types::ErrorCode::CrossDevice),
+            (FsError::Exist, fs_types::ErrorCode::Exist),
+            (FsError::InvalidPath, fs_types::ErrorCode::Invalid),
+            (FsError::IsDirectory, fs_types::ErrorCode::IsDirectory),
+            (FsError::NoEntry, fs_types::ErrorCode::NoEntry),
+            (FsError::NotDirectory, fs_types::ErrorCode::NotDirectory),
+            (FsError::NotEmpty, fs_types::ErrorCode::NotEmpty),
+            (FsError::NotPermitted, fs_types::ErrorCode::NotPermitted),
+            (FsError::Overflow, fs_types::ErrorCode::Overflow),
+            (FsError::ReadOnly, fs_types::ErrorCode::ReadOnly),
+            (FsError::SymlinkLoop, fs_types::ErrorCode::Loop),
+        ];
+
+        for (source, expected) in cases {
+            assert_eq!(fs_types::ErrorCode::from(source), expected);
+        }
     }
 }
