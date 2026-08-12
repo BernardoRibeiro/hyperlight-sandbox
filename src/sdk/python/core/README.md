@@ -41,11 +41,40 @@ packaged JavaScript Wasm guest package.
 Use `Sandbox(backend="hyperlight-js")` to run the separate HyperlightJS
 backend package.
 
+## Filesystem Mounts
+
+```python
+sandbox = Sandbox(
+    backend="wasm",
+    module="python_guest.path",
+    input_dir="./fixtures",
+    temp_output=True,
+    work_dir="./disposable-workspace",
+    work_dir_access="rw",
+    temp_dir=True,
+)
+```
+
+| Guest path | Default access | Lifetime |
+|---|---|---|
+| `/input` | Read-only | Preserved |
+| `/output` | Read/write | Cleared recursively before each run and after restore |
+| `/work` | Read-only; `"rw"` must be explicit | Preserved |
+| `/tmp` | Read/write and private to the sandbox | Cleared recursively before each run and after restore |
+
+Mount a disposable copy or Git worktree when using
+`work_dir_access="rw"`. Capability isolation prevents access outside `/work`,
+but it cannot prevent guest code from deleting or corrupting files inside the
+workspace it was explicitly given. Host directories mounted with different
+lifetimes must not alias or contain one another; construction fails before an
+ephemeral cleanup could reach a persistent mount.
+
 ## Snapshot Semantics
 
-- `snapshot()` captures guest runtime state and backend-managed sandbox files.
-- `restore()` rewinds both runtime state and sandbox file state to the snapshot point.
-- Output files under `/output` are ephemeral per `run()` and are cleared before each execution.
+- `snapshot()` captures guest runtime state, not persistent host filesystem state.
+- `restore()` rewinds runtime state, clears `/output` and `/tmp`, and preserves `/work`.
+- Every `run()` recursively clears `/output` and `/tmp` before guest execution.
+- Filesystem changes under `/work` persist across runs and snapshot restore.
 
 ## Build
 

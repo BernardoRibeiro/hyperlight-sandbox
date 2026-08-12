@@ -10,7 +10,7 @@ import platform
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from importlib import metadata
-from typing import Any
+from typing import Any, Literal
 
 from ._module_resolver import DEFAULT_MODULE_REF, resolve_module_path
 
@@ -35,6 +35,15 @@ def _normalize_backend(backend: str) -> str:
     if normalized in {"javascript", "js", "hyperlight-js"}:
         return "hyperlight-js"
     raise ValueError(f"Unknown backend '{backend}'. Expected 'wasm' or 'hyperlight-js'.")
+
+
+def _normalize_work_dir_access(access: str) -> WorkDirAccess:
+    normalized = access.strip().lower().replace("_", "-")
+    if normalized in {"ro", "read-only", "readonly"}:
+        return "ro"
+    if normalized in {"rw", "read-write", "readwrite"}:
+        return "rw"
+    raise ValueError(f"Invalid work_dir_access '{access}'. Expected 'ro' or 'rw'.")
 
 
 def _load_backend(backend: str):
@@ -64,8 +73,12 @@ __all__ = [
     "ExecutionResult",
     "Sandbox",
     "SandboxEnvironment",
+    "WorkDirAccess",
     "__version__",
 ]
+
+
+WorkDirAccess = Literal["ro", "rw"]
 
 
 @dataclass
@@ -88,6 +101,9 @@ class SandboxEnvironment:
     input_dir: str | None = None
     output_dir: str | None = None
     temp_output: bool = False
+    work_dir: str | None = None
+    work_dir_access: WorkDirAccess = "ro"
+    temp_dir: bool = False
     backend: str = "wasm"
     module: str | None = DEFAULT_MODULE_REF
     module_path: str | None = None
@@ -104,6 +120,9 @@ class Sandbox:
         input_dir: str | None = None,
         output_dir: str | None = None,
         temp_output: bool = False,
+        work_dir: str | None = None,
+        work_dir_access: WorkDirAccess = "ro",
+        temp_dir: bool = False,
         backend: str = "wasm",
         module: str | None = DEFAULT_MODULE_REF,
         module_path: str | None = None,
@@ -114,6 +133,7 @@ class Sandbox:
             heap_size = _DEFAULT_HEAP_SIZE
         if stack_size is None:
             stack_size = _DEFAULT_STACK_SIZE
+        work_dir_access = _normalize_work_dir_access(work_dir_access)
         normalized_backend, native_cls = _load_backend(backend)
         effective_module = module
         if module_path is not None and module == DEFAULT_MODULE_REF:
@@ -129,6 +149,11 @@ class Sandbox:
             kwargs["output_dir"] = output_dir
         if temp_output:
             kwargs["temp_output"] = True
+        if work_dir is not None:
+            kwargs["work_dir"] = work_dir
+            kwargs["work_dir_access"] = work_dir_access
+        if temp_dir:
+            kwargs["temp_dir"] = True
 
         if normalized_backend == "wasm":
             resolved_module_path = resolve_module_path(module=effective_module, module_path=module_path)
@@ -181,15 +206,17 @@ class Sandbox:
         self._inner.allow_domain(target, methods)
 
     def snapshot(self):
-        """Capture the current sandbox state.
+        """Capture guest runtime state.
 
         Returns a snapshot object backed by shared reference counting.
         Old snapshots should be deleted when no longer needed to allow
-        memory reclamation.
+        memory reclamation. Persistent host mounts such as ``/work`` are not
+        copied into the snapshot.
         """
         return self._inner.snapshot()
 
     def restore(self, snapshot: Any) -> None:
+        """Restore runtime state, clear ``/output`` and ``/tmp``, and keep ``/work``."""
         self._inner.restore(snapshot)
 
 
@@ -211,6 +238,11 @@ class CodeExecutionTool:
                 kwargs["output_dir"] = self.environment.output_dir
             if self.environment.temp_output:
                 kwargs["temp_output"] = True
+            if self.environment.work_dir is not None:
+                kwargs["work_dir"] = self.environment.work_dir
+                kwargs["work_dir_access"] = self.environment.work_dir_access
+            if self.environment.temp_dir:
+                kwargs["temp_dir"] = True
             self._sandbox = Sandbox(
                 **kwargs,
                 backend=self.environment.backend,

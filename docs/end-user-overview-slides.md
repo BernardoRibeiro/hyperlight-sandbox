@@ -160,9 +160,9 @@ for task in tasks:
     print(result.stdout)
 ```
 
-- `snapshot()` captures runtime state and files
-- `restore()` rewinds to that point — fast, no cold start
-- Tools survive a restore; runtime and file state do not
+- `snapshot()` captures guest runtime state, not persistent host mounts
+- `restore()` rewinds runtime state and clears ephemeral `/output` and `/tmp`
+- Tools and `/work` changes survive restore; `/work` is not rolled back
 
 ---
 
