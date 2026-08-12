@@ -168,6 +168,12 @@ impl<G: Guest> Sandbox<G> {
     /// Output files under `/output` are cleared before each run. Input files
     /// persist until `clear_files` is called.
     pub fn run(&mut self, code: &str) -> Result<ExecutionResult> {
+        self.fs
+            .lock()
+            .map_err(|_| anyhow::anyhow!("filesystem mutex poisoned during run"))?
+            .prepare_for_run()
+            .map_err(|error| anyhow::anyhow!("failed to reset filesystem after run: {error:?}"))?;
+
         self.inner.run(code)
     }
 
