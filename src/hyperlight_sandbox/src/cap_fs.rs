@@ -603,7 +603,7 @@ impl CapFs {
                 DirPerms::READ | DirPerms::MUTATE,
                 FilePerms::READ | FilePerms::WRITE,
             ),
-            "/temp",
+            "/tmp",
             MountLifetime::ClearBeforeRun,
         )
         .map_err(|err| anyhow::anyhow!("{err:?}"))?;
@@ -3683,6 +3683,10 @@ mod tests {
         );
     }
 
+    //This test verifies three important properties:
+    // /work contents survive cleanup.
+    // /tmp contents are deleted.
+    // Descriptors under /tmp are invalidated, while /work descriptors remain valid.
     #[test]
     fn temp_mount_is_cleared_but_work_mount_persists() {
         let work = tempfile::tempdir().unwrap();
@@ -3693,24 +3697,62 @@ mod tests {
             .with_temp_dir()
             .unwrap();
 
-        let temp_path = fs.temp_paths.clone().unwrap();
-        // Use the appropriate preopen descriptors from your implementation.
-        // Create:
-        //   /work/persistent.txt
-        //   /tmp/temporary.txt
-        std::fs::write(work.path().join("persistent.txt"), b"survives").unwrap();
-        std::fs::write(temp_path.join("temporary.txt"), b"survives").unwrap();
+        let work_fd = preopen_fd(&fs, "/work");
+        let temp_fd = preopen_fd(&fs, "/tmp");
+
+        let work_file = fs.open_at(work_fd, "persistent.txt", OpenFlags::CREATE).unwrap();
+        fs.write_file(work_file, 0, b"survives").unwrap();
+
+        let temp_file = fs.open_at(temp_fd, "temporary.txt", OpenFlags::CREATE).unwrap();
+        fs.write_file(temp_file, 0, b"survives").unwrap();
 
         fs.prepare_for_run().unwrap();
 
-        // Verify:
-        //   /work/persistent.txt still exists
-        //   /tmp/temporary.txt no longer exists
+        assert!(work.path().join("persistent.txt").exists());
+
+        let temp_path = fs.temp_paths.as_ref().unwrap();
+        assert!(!temp_path.join("temporary.txt").exists());
 
         assert_eq!(
-            std::fs::read(work.path().join("persistent.txt")).unwrap(),
-            b"survives"
+            fs.get_type(work_file),
+            Ok(DescriptorType::RegularFile)
         );
-        assert!(!temp_path.join("temporary.txt").exists());
+        assert_eq!(
+            fs.get_type(temp_file),
+            Err(FsError::BadDescriptor)
+        );
+
     }
+
+
+    // Then add a test proving that both ephemeral mounts are cleaned:
+    #[test]
+    fn all_ephemeral_mounts_are_cleared() {
+        let work = tempfile::tempdir().unwrap();
+
+        let mut fs = CapFs::new()
+            .with_output_dir(work.path(),
+            DirPerms::READ | DirPerms::MUTATE,
+            FilePerms::READ | FilePerms::WRITE,
+            )
+            .unwrap()
+            .with_temp_dir()
+            .unwrap();
+        let output_fd = preopen_fd(&fs, "/output");
+        let temp_fd = preopen_fd(&fs, "/tmp");
+
+        let output_file = fs.open_at(output_fd, "output.txt", OpenFlags::CREATE).unwrap();
+        fs.write_file(output_file, 0, b"survives").unwrap();
+
+        let temp_file = fs.open_at(temp_fd, "temporary.txt", OpenFlags::CREATE).unwrap();
+        fs.write_file(temp_file, 0, b"survives").unwrap();
+
+        fs.clear_ephemeral_mounts().unwrap();
+
+        // output file does not exist
+        assert!(!work.path().join("output.txt").exists());
+        // temp file does not exist
+        assert!(!fs.temp_paths.as_ref().unwrap().join("temporary.txt").exists());
+    }
+            
 }
