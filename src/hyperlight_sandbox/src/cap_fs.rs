@@ -10,11 +10,18 @@
 //!   the directory before creating the sandbox; the guest can only read.
 //!
 //! * **Output** — default temp directory or host-provided with explicit
-//!   permissions, exposed as a writable WASI preopen.  Wiped clean before
+//!   permissions, exposed as a writable WASI preopen. Wiped clean before
 //!   each run.
 //!
-//! Snapshots only capture runtime state — input is immutable and output is
-//! ephemeral, so no filesystem state needs to be saved or restored.
+//! * **Work** — caller-provided persistent workspace, read-only by default
+//!   and writable only when explicitly requested. Never cleaned by CapFs.
+//!
+//! * **Tmp** — private, writable temporary directory owned by the sandbox.
+//!   Wiped clean before each run and after snapshot restore.
+//!
+//! Snapshots only capture runtime state. Persistent mounts are not rewound;
+//! mounts marked [`MountLifetime::ClearBeforeRun`] are recursively cleaned by
+//! [`CapFs::prepare_for_run`].
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -27,6 +34,28 @@ use cap_std::fs::Dir as CapDir;
 
 /// First preopen fd (after 0–2 stdio).
 const FIRST_PREOPEN_FD: u32 = 3;
+
+/// Filesystem cleanup policy attached to a preopen capability.
+///
+/// Cleanup decisions are based on this value rather than the guest-visible
+/// mount name, so adding a new persistent mount cannot accidentally make it
+/// eligible for generic recursive cleanup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MountLifetime {
+    /// Preserve host filesystem changes across runs and snapshot restore.
+    Persistent,
+    /// Recursively clear the mount before every run and after snapshot restore.
+    ClearBeforeRun,
+}
+
+/// Access mode for a caller-provided `/work` mount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkDirAccess {
+    /// Allow directory traversal and file reads only.
+    ReadOnly,
+    /// Allow reads, writes, creation, rename, and deletion.
+    ReadWrite,
+}
 
 // ---------------------------------------------------------------------------
 // Filesystem errors
@@ -421,14 +450,18 @@ struct CleanupBudget {
 struct PreopenEntry {
     dir: Dir,
     guest_path: String,
+    lifetime: MountLifetime,
 }
 
 /// Capability-based virtual filesystem.
 ///
-/// Input is read-only and shared across snapshots; output is ephemeral.
+/// Each preopen has explicit permissions and a cleanup lifetime.
 pub struct CapFs {
     // Preopened directories keyed by fd.
     preopen_dirs: HashMap<u32, PreopenEntry>,
+    // Canonical host roots used only to reject lifetime-conflicting aliases
+    // during construction. Descriptors never resolve through these paths.
+    canonical_mount_roots: Vec<(PathBuf, String, MountLifetime)>,
     // The fd assigned to the output preopen (if configured).
     output_fd: Option<u32>,
 
@@ -442,8 +475,10 @@ pub struct CapFs {
 
     // Host filesystem path to the output directory.
     output_path: Option<PathBuf>,
-    // Owns the output temp dir when using the default.
-    _output_tmp: Option<tempfile::TempDir>,
+    // Host filesystem path to the private temporary directory.
+    temp_path: Option<PathBuf>,
+    // Owns automatically-created mount roots for the sandbox lifetime.
+    _owned_mounts: Vec<tempfile::TempDir>,
 }
 
 impl Default for CapFs {
@@ -455,11 +490,16 @@ impl Default for CapFs {
 impl CapFs {
     /// Create an empty filesystem with no preopens.
     ///
-    /// Use [`with_input`], [`with_temp_output`], or [`with_output_dir`] to add
-    /// directories. Without any preopens the guest sees no filesystem.
+    /// Use [`with_input`](Self::with_input),
+    /// [`with_temp_output`](Self::with_temp_output),
+    /// [`with_output_dir`](Self::with_output_dir),
+    /// [`with_work_dir`](Self::with_work_dir), or
+    /// [`with_temp_dir`](Self::with_temp_dir) to add directories. Without any
+    /// preopens the guest sees no filesystem.
     pub fn new() -> Self {
         Self {
             preopen_dirs: HashMap::new(),
+            canonical_mount_roots: Vec::new(),
             output_fd: None,
             descriptors: HashMap::new(),
             streams: HashMap::new(),
@@ -468,7 +508,8 @@ impl CapFs {
             limits: FilesystemLimits::default(),
             run_budget: RunBudget::default(),
             output_path: None,
-            _output_tmp: None,
+            temp_path: None,
+            _owned_mounts: Vec::new(),
         }
     }
 
@@ -494,9 +535,15 @@ impl CapFs {
                     input_path.as_ref().display()
                 )
             })?;
+        self.register_mount_root(
+            input_path.as_ref(),
+            "/input",
+            MountLifetime::Persistent,
+        )?;
         self.register_preopen(
             Dir::new(input_cap, DirPerms::READ, FilePerms::READ),
             "/input",
+            MountLifetime::Persistent,
         )
         .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         Ok(self)
@@ -507,6 +554,11 @@ impl CapFs {
         let output_tmp = tempfile::tempdir().context("failed to create output temp dir")?;
         let output_cap = CapDir::open_ambient_dir(output_tmp.path(), ambient_authority())
             .context("failed to open output temp dir")?;
+        self.register_mount_root(
+            output_tmp.path(),
+            "/output",
+            MountLifetime::ClearBeforeRun,
+        )?;
         let fd = self
             .register_preopen(
                 Dir::new(
@@ -515,11 +567,12 @@ impl CapFs {
                     FilePerms::READ | FilePerms::WRITE,
                 ),
                 "/output",
+                MountLifetime::ClearBeforeRun,
             )
             .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         self.output_fd = Some(fd);
         self.output_path = Some(output_tmp.path().to_path_buf());
-        self._output_tmp = Some(output_tmp);
+        self._owned_mounts.push(output_tmp);
         Ok(self)
     }
 
@@ -537,11 +590,86 @@ impl CapFs {
                     output_path.as_ref().display()
                 )
             })?;
+        self.register_mount_root(
+            output_path.as_ref(),
+            "/output",
+            MountLifetime::ClearBeforeRun,
+        )?;
         let fd = self
-            .register_preopen(Dir::new(output_cap, dir_perms, file_perms), "/output")
+            .register_preopen(
+                Dir::new(output_cap, dir_perms, file_perms),
+                "/output",
+                MountLifetime::ClearBeforeRun,
+            )
             .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         self.output_fd = Some(fd);
         self.output_path = Some(output_path.as_ref().to_path_buf());
+        Ok(self)
+    }
+
+    /// Add a caller-provided persistent workspace preopen (`/work`).
+    ///
+    /// The safe default is [`WorkDirAccess::ReadOnly`]. A read-write workspace
+    /// must be requested explicitly by the caller. CapFs never cleans `/work`
+    /// and snapshot restore does not rewind changes made beneath it.
+    pub fn with_work_dir(
+        mut self,
+        work_path: impl AsRef<Path>,
+        access: WorkDirAccess,
+    ) -> Result<Self> {
+        let work_cap = CapDir::open_ambient_dir(work_path.as_ref(), ambient_authority())
+            .with_context(|| {
+                format!(
+                    "failed to open work dir: {}",
+                    work_path.as_ref().display()
+                )
+            })?;
+        self.register_mount_root(
+            work_path.as_ref(),
+            "/work",
+            MountLifetime::Persistent,
+        )?;
+        let (dir_perms, file_perms) = match access {
+            WorkDirAccess::ReadOnly => (DirPerms::READ, FilePerms::READ),
+            WorkDirAccess::ReadWrite => (
+                DirPerms::READ | DirPerms::MUTATE,
+                FilePerms::READ | FilePerms::WRITE,
+            ),
+        };
+        self.register_preopen(
+            Dir::new(work_cap, dir_perms, file_perms),
+            "/work",
+            MountLifetime::Persistent,
+        )
+        .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+        Ok(self)
+    }
+
+    /// Add a private writable temporary preopen (`/tmp`).
+    ///
+    /// The backing directory is owned by this CapFs instance and is
+    /// recursively cleared by [`prepare_for_run`](Self::prepare_for_run).
+    pub fn with_temp_dir(mut self) -> Result<Self> {
+        let temp_dir = tempfile::tempdir().context("failed to create sandbox temp dir")?;
+        let temp_cap = CapDir::open_ambient_dir(temp_dir.path(), ambient_authority())
+            .context("failed to open sandbox temp dir")?;
+        self.register_mount_root(
+            temp_dir.path(),
+            "/tmp",
+            MountLifetime::ClearBeforeRun,
+        )?;
+        self.register_preopen(
+            Dir::new(
+                temp_cap,
+                DirPerms::READ | DirPerms::MUTATE,
+                FilePerms::READ | FilePerms::WRITE,
+            ),
+            "/tmp",
+            MountLifetime::ClearBeforeRun,
+        )
+        .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+        self.temp_path = Some(temp_dir.path().to_path_buf());
+        self._owned_mounts.push(temp_dir);
         Ok(self)
     }
 
@@ -644,6 +772,14 @@ impl CapFs {
         self.output_path.as_deref()
     }
 
+    /// Return the host path backing the private `/tmp` mount, if enabled.
+    ///
+    /// This is intended for host-side diagnostics and tests. The guest sees
+    /// only `/tmp` and never receives this ambient host path.
+    pub fn temp_path(&self) -> Option<&Path> {
+        self.temp_path.as_deref()
+    }
+
     /// Maximum number of output files returned by `get_output_files()`.
     const MAX_OUTPUT_FILE_COUNT: usize = 10_000;
 
@@ -692,17 +828,16 @@ impl CapFs {
 
     /// Recursively clear an ephemeral mount while preserving its preopen root.
     ///
-    /// At present only `/output` is ephemeral. `/input` and any other
-    /// persistent preopen are rejected even if they grant mutation rights.
+    /// Persistent mounts are rejected even if they grant mutation rights.
     pub fn clear_mount(&mut self, mount_fd: u32) -> Result<(), FsError> {
-        if self.output_fd != Some(mount_fd) {
-            return Err(FsError::NotPermitted);
-        }
-        let root = self
+        let preopen = self
             .preopen_dirs
             .get(&mount_fd)
-            .map(|entry| entry.dir.clone())
             .ok_or(FsError::BadDescriptor)?;
+        if preopen.lifetime != MountLifetime::ClearBeforeRun {
+            return Err(FsError::NotPermitted);
+        }
+        let root = preopen.dir.clone();
 
         let mut cleanup_budget = CleanupBudget::default();
         let cleanup_result =
@@ -724,9 +859,25 @@ impl CapFs {
         cleanup_result
     }
 
+    /// Recursively clean every preopen marked as invocation-ephemeral.
+    fn clear_ephemeral_mounts(&mut self) -> Result<(), FsError> {
+        let mut mount_fds = self
+            .preopen_dirs
+            .iter()
+            .filter_map(|(&fd, entry)| {
+                (entry.lifetime == MountLifetime::ClearBeforeRun).then_some(fd)
+            })
+            .collect::<Vec<_>>();
+        mount_fds.sort_unstable();
+        for mount_fd in mount_fds {
+            self.clear_mount(mount_fd)?;
+        }
+        Ok(())
+    }
+
     /// Establish clean ephemeral state and reset per-run quota accounting.
     pub fn prepare_for_run(&mut self) -> Result<(), FsError> {
-        self.clear_output_files()?;
+        self.clear_ephemeral_mounts()?;
         self.run_budget = RunBudget::default();
         Ok(())
     }
@@ -1399,10 +1550,13 @@ impl CapFs {
 
     /// Return the WASI preopens — derived from the registered directories.
     pub fn preopens(&self) -> Vec<(u32, &str)> {
-        self.preopen_dirs
+        let mut preopens = self
+            .preopen_dirs
             .iter()
             .map(|(&fd, e)| (fd, e.guest_path.as_str()))
-            .collect()
+            .collect::<Vec<_>>();
+        preopens.sort_unstable_by_key(|(fd, _)| *fd);
+        preopens
     }
 
     // -----------------------------------------------------------------------
@@ -1558,7 +1712,12 @@ impl CapFs {
             .retain(|_, stream| !descriptors.contains(&stream.dir_fd));
     }
 
-    fn register_preopen(&mut self, dir: Dir, guest_path: &str) -> Result<u32, FsError> {
+    fn register_preopen(
+        &mut self,
+        dir: Dir,
+        guest_path: &str,
+        lifetime: MountLifetime,
+    ) -> Result<u32, FsError> {
         self.ensure_descriptor_capacity()?;
         let fd = self.alloc_handle()?;
         self.preopen_dirs.insert(
@@ -1566,6 +1725,7 @@ impl CapFs {
             PreopenEntry {
                 dir: dir.clone(),
                 guest_path: guest_path.to_string(),
+                lifetime,
             },
         );
         self.descriptors.insert(
@@ -1580,6 +1740,40 @@ impl CapFs {
             },
         );
         Ok(fd)
+    }
+
+    /// Record one mount root and reject overlap with a mount of the opposite
+    /// lifetime. This validation prevents an ephemeral cleanup traversal from
+    /// reaching a persistent mount through an aliased or nested host path.
+    /// Canonical host paths are configuration metadata only; guest operations
+    /// continue to resolve exclusively through `cap_std::fs::Dir` handles.
+    fn register_mount_root(
+        &mut self,
+        host_path: &Path,
+        guest_path: &str,
+        lifetime: MountLifetime,
+    ) -> Result<()> {
+        let canonical = std::fs::canonicalize(host_path).with_context(|| {
+            format!(
+                "failed to resolve {guest_path} mount root: {}",
+                host_path.display()
+            )
+        })?;
+        for (other_root, other_guest_path, other_lifetime) in &self.canonical_mount_roots {
+            if *other_lifetime != lifetime
+                && (canonical.starts_with(other_root) || other_root.starts_with(&canonical))
+            {
+                anyhow::bail!(
+                    "mount roots with different lifetimes must not overlap: \
+                     {guest_path} ({}) conflicts with {other_guest_path} ({})",
+                    canonical.display(),
+                    other_root.display(),
+                );
+            }
+        }
+        self.canonical_mount_roots
+            .push((canonical, guest_path.to_string(), lifetime));
+        Ok(())
     }
 
     /// Resolve a validated nested path relative to an opened directory while
@@ -2164,6 +2358,222 @@ mod tests {
 
         assert_eq!(fs.clear_mount(input_fd), Err(FsError::NotPermitted));
         assert!(input.path().join("keep.txt").is_file());
+    }
+
+    #[test]
+    fn read_only_work_mount_reads_but_rejects_mutation() {
+        let work = tempfile::tempdir().unwrap();
+        host_write_input(&work, "project.txt", b"project");
+        let mut fs = CapFs::new()
+            .with_work_dir(work.path(), WorkDirAccess::ReadOnly)
+            .unwrap();
+        let work_fd = preopen_fd(&fs, "/work");
+
+        let project_fd = fs
+            .open_at(work_fd, "project.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+        assert_eq!(fs.read_file(project_fd, 0, 100).unwrap().0, b"project");
+        assert_eq!(
+            fs.open_at(work_fd, "created.txt", OpenFlags::CREATE),
+            Err(FsError::NotPermitted)
+        );
+        assert_eq!(
+            fs.create_directory_at(work_fd, "created"),
+            Err(FsError::NotPermitted)
+        );
+        assert_eq!(
+            fs.unlink_file_at(work_fd, "project.txt"),
+            Err(FsError::NotPermitted)
+        );
+        assert_eq!(fs.clear_mount(work_fd), Err(FsError::NotPermitted));
+        assert_eq!(
+            std::fs::read(work.path().join("project.txt")).unwrap(),
+            b"project"
+        );
+    }
+
+    #[test]
+    fn read_write_work_mount_persists_across_prepare_for_run() {
+        let work = tempfile::tempdir().unwrap();
+        let mut fs = CapFs::new()
+            .with_work_dir(work.path(), WorkDirAccess::ReadWrite)
+            .unwrap();
+        let work_fd = preopen_fd(&fs, "/work");
+        let file_fd = fs
+            .open_at(work_fd, "persist.txt", OpenFlags::CREATE)
+            .unwrap();
+        fs.write_file(file_fd, 0, b"persistent").unwrap();
+
+        fs.prepare_for_run().unwrap();
+
+        assert_eq!(fs.get_type(file_fd), Ok(DescriptorType::RegularFile));
+        assert_eq!(fs.read_file(file_fd, 0, 100).unwrap().0, b"persistent");
+        assert_eq!(
+            std::fs::read(work.path().join("persist.txt")).unwrap(),
+            b"persistent"
+        );
+        assert_eq!(fs.clear_mount(work_fd), Err(FsError::NotPermitted));
+    }
+
+    #[test]
+    fn prepare_for_run_clears_output_and_tmp_but_preserves_work() {
+        let output = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        host_create_dir(&output, "old");
+        host_create_dir(&work, "keep");
+        host_write_output(&output, "old/output.txt", b"output");
+        host_write_output(&work, "keep/work.txt", b"work");
+        let mut fs = CapFs::new()
+            .with_output_dir(
+                output.path(),
+                DirPerms::READ | DirPerms::MUTATE,
+                FilePerms::READ | FilePerms::WRITE,
+            )
+            .unwrap()
+            .with_work_dir(work.path(), WorkDirAccess::ReadWrite)
+            .unwrap()
+            .with_temp_dir()
+            .unwrap();
+        let tmp_path = fs.temp_path().unwrap().to_path_buf();
+        std::fs::create_dir_all(tmp_path.join("old")).unwrap();
+        std::fs::write(tmp_path.join("old/tmp.txt"), b"tmp").unwrap();
+
+        let tmp_fd = preopen_fd(&fs, "/tmp");
+        let tmp_file = fs
+            .open_at(tmp_fd, "old/tmp.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+        fs.prepare_for_run().unwrap();
+
+        assert_eq!(std::fs::read_dir(output.path()).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(&tmp_path).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read(work.path().join("keep/work.txt")).unwrap(),
+            b"work"
+        );
+        assert_eq!(fs.get_type(tmp_file), Err(FsError::BadDescriptor));
+        assert_eq!(fs.get_type(tmp_fd), Ok(DescriptorType::Directory));
+    }
+
+    #[test]
+    fn private_tmp_mounts_have_distinct_owned_roots() {
+        let first = CapFs::new().with_temp_dir().unwrap();
+        let second = CapFs::new().with_temp_dir().unwrap();
+
+        assert_ne!(first.temp_path().unwrap(), second.temp_path().unwrap());
+        assert!(first.temp_path().unwrap().is_dir());
+        assert!(second.temp_path().unwrap().is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tmp_cleanup_unlinks_external_directory_symlink_without_following_it() {
+        use std::os::unix::fs::symlink;
+
+        let outside = tempfile::tempdir().unwrap();
+        host_write_input(&outside, "sentinel.txt", b"outside");
+        let mut fs = CapFs::new().with_temp_dir().unwrap();
+        let tmp_path = fs.temp_path().unwrap().to_path_buf();
+        symlink(outside.path(), tmp_path.join("outside-link")).unwrap();
+
+        fs.prepare_for_run().unwrap();
+
+        assert!(!tmp_path.join("outside-link").exists());
+        assert_eq!(
+            std::fs::read(outside.path().join("sentinel.txt")).unwrap(),
+            b"outside"
+        );
+    }
+
+    #[test]
+    fn same_workspace_can_have_independent_read_only_and_read_write_views() {
+        let work = tempfile::tempdir().unwrap();
+        host_write_input(&work, "shared.txt", b"shared");
+        let mut read_only = CapFs::new()
+            .with_work_dir(work.path(), WorkDirAccess::ReadOnly)
+            .unwrap();
+        let mut read_write = CapFs::new()
+            .with_work_dir(work.path(), WorkDirAccess::ReadWrite)
+            .unwrap();
+        let read_only_fd = preopen_fd(&read_only, "/work");
+        let read_write_fd = preopen_fd(&read_write, "/work");
+
+        assert_eq!(
+            read_only.open_at(read_only_fd, "denied.txt", OpenFlags::CREATE),
+            Err(FsError::NotPermitted)
+        );
+        let created_fd = read_write
+            .open_at(read_write_fd, "allowed.txt", OpenFlags::CREATE)
+            .unwrap();
+        read_write.write_file(created_fd, 0, b"allowed").unwrap();
+
+        let shared_fd = read_only
+            .open_at(read_only_fd, "allowed.txt", OpenFlags::OPEN_EXISTING)
+            .unwrap();
+        assert_eq!(
+            read_only.read_file(shared_fd, 0, 100).unwrap().0,
+            b"allowed"
+        );
+    }
+
+    #[test]
+    fn persistent_and_ephemeral_mount_roots_cannot_alias() {
+        let shared = tempfile::tempdir().unwrap();
+        let result = CapFs::new()
+            .with_work_dir(shared.path(), WorkDirAccess::ReadWrite)
+            .unwrap()
+            .with_output_dir(
+                shared.path(),
+                DirPerms::READ | DirPerms::MUTATE,
+                FilePerms::READ | FilePerms::WRITE,
+            );
+
+        let error = result.err().expect("lifetime-conflicting alias must fail");
+        assert!(error.to_string().contains("different lifetimes"));
+    }
+
+    #[test]
+    fn ephemeral_mount_root_cannot_contain_a_persistent_mount() {
+        let output = tempfile::tempdir().unwrap();
+        let nested_work = output.path().join("work");
+        std::fs::create_dir(&nested_work).unwrap();
+        let result = CapFs::new()
+            .with_output_dir(
+                output.path(),
+                DirPerms::READ | DirPerms::MUTATE,
+                FilePerms::READ | FilePerms::WRITE,
+            )
+            .unwrap()
+            .with_work_dir(&nested_work, WorkDirAccess::ReadWrite);
+
+        let error = result
+            .err()
+            .expect("ephemeral parent of persistent mount must fail");
+        assert!(error.to_string().contains("different lifetimes"));
+    }
+
+    #[test]
+    fn preopens_follow_input_output_work_tmp_builder_order() {
+        let input = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let fs = CapFs::new()
+            .with_input(input.path())
+            .unwrap()
+            .with_output_dir(
+                output.path(),
+                DirPerms::READ | DirPerms::MUTATE,
+                FilePerms::READ | FilePerms::WRITE,
+            )
+            .unwrap()
+            .with_work_dir(work.path(), WorkDirAccess::ReadOnly)
+            .unwrap()
+            .with_temp_dir()
+            .unwrap();
+
+        assert_eq!(
+            fs.preopens(),
+            vec![(3, "/input"), (4, "/output"), (5, "/work"), (6, "/tmp")]
+        );
     }
 
     #[test]
@@ -3238,6 +3648,7 @@ mod tests {
                     FilePerms::READ | FilePerms::WRITE,
                 ),
                 "/other",
+                MountLifetime::Persistent,
             )
             .unwrap();
         let output_fd = preopen_fd(&fs, "/output");

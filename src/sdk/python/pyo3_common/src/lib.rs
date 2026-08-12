@@ -1,7 +1,34 @@
-use hyperlight_sandbox::{ArgType, ToolRegistry, ToolSchema};
-use pyo3::exceptions::{PyRuntimeError, PyTypeError};
+use hyperlight_sandbox::{ArgType, ToolRegistry, ToolSchema, WorkDirAccess};
+use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
+
+/// Parse the stable Python SDK spelling for `/work` access.
+pub fn parse_work_dir_access(access: &str) -> PyResult<WorkDirAccess> {
+    match access.trim().to_ascii_lowercase().as_str() {
+        "ro" | "read-only" | "readonly" => Ok(WorkDirAccess::ReadOnly),
+        "rw" | "read-write" | "readwrite" => Ok(WorkDirAccess::ReadWrite),
+        _ => Err(PyValueError::new_err(format!(
+            "invalid work_dir_access '{access}'; expected 'ro' or 'rw'"
+        ))),
+    }
+}
+
+/// Validate a caller-provided mount root before lazy guest construction.
+pub fn validate_host_directory(label: &str, path: Option<&str>) -> PyResult<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        PyValueError::new_err(format!("{label} '{path}' is not accessible: {error}"))
+    })?;
+    if !metadata.is_dir() {
+        return Err(PyValueError::new_err(format!(
+            "{label} '{path}' is not a directory"
+        )));
+    }
+    Ok(())
+}
 
 /// Convert a human-readable size string (e.g. `"200Mi"`) to bytes.
 pub fn parse_size(size: &str) -> PyResult<u64> {

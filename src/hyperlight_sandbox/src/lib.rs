@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 pub use cap_fs::{
     CapFs, DescriptorFlags, DescriptorStat, DescriptorType, Dir, DirPerms, FilePerms,
-    FilesystemLimits, FsError, OpenFlags,
+    FilesystemLimits, FsError, MountLifetime, OpenFlags, WorkDirAccess,
 };
 pub use network::{HttpMethod, MethodFilter, NetworkPermission, NetworkPermissions};
 use serde::{Deserialize, Serialize};
@@ -121,8 +121,8 @@ pub trait GuestSandbox: Send {
     type SnapshotData: Send + Sync + 'static;
     /// Execute guest code.
     ///
-    /// Output files under `/output` are wiped before each execution.
-    /// Input files are read-only and managed by the host.
+    /// Ephemeral files under `/output` and `/tmp` are wiped before each
+    /// execution. Persistent `/input` and `/work` mounts are preserved.
     fn run(&mut self, code: &str) -> Result<ExecutionResult>;
     /// Capture a snapshot of the guest runtime state.
     fn snapshot(&mut self) -> Result<Snapshot<Self::SnapshotData>>;
@@ -165,8 +165,8 @@ impl<G: Guest> Sandbox<G> {
 
     /// Execute guest code.
     ///
-    /// Output files under `/output` are cleared before each run. Input files
-    /// persist until `clear_files` is called.
+    /// Ephemeral `/output` and `/tmp` mounts are cleared before each run.
+    /// Persistent `/input` and `/work` mounts are preserved.
     pub fn run(&mut self, code: &str) -> Result<ExecutionResult> {
         self.inner.run(code)
     }
@@ -179,6 +179,9 @@ impl<G: Guest> Sandbox<G> {
         &mut self,
         snapshot: &Snapshot<<G::Sandbox as GuestSandbox>::SnapshotData>,
     ) -> Result<()> {
+        // Runtime state is rewound by the backend. Host filesystem state is
+        // governed separately by each preopen's MountLifetime: ephemeral
+        // mounts are cleared and persistent mounts such as /work are kept.
         self.inner.restore(snapshot)?;
         self.fs
             .lock()
@@ -241,6 +244,8 @@ pub struct SandboxBuilder<G = NoGuest> {
     input_dir: Option<PathBuf>,
     output_dir: Option<(PathBuf, DirPerms, FilePerms)>,
     temp_output: bool,
+    work_dir: Option<(PathBuf, WorkDirAccess)>,
+    temp_dir: bool,
     filesystem_limits: FilesystemLimits,
 }
 
@@ -259,6 +264,8 @@ impl Default for SandboxBuilder<NoGuest> {
             input_dir: None,
             output_dir: None,
             temp_output: false,
+            work_dir: None,
+            temp_dir: false,
             filesystem_limits: FilesystemLimits::default(),
         }
     }
@@ -320,6 +327,24 @@ impl<G> SandboxBuilder<G> {
         self
     }
 
+    /// Set the host directory exposed as the persistent `/work` preopen.
+    ///
+    /// Callers must choose the access mode explicitly. Prefer
+    /// [`WorkDirAccess::ReadOnly`] unless guest writes are required.
+    pub fn work_dir(mut self, path: impl Into<PathBuf>, access: WorkDirAccess) -> Self {
+        self.work_dir = Some((path.into(), access));
+        self
+    }
+
+    /// Enable a private writable `/tmp` preopen.
+    ///
+    /// Its backing directory is owned by the sandbox and recursively cleared
+    /// before every run and after snapshot restore.
+    pub fn temp_dir(mut self) -> Self {
+        self.temp_dir = true;
+        self
+    }
+
     /// Configure filesystem resource limits and per-run quotas.
     pub fn filesystem_limits(mut self, limits: FilesystemLimits) -> Self {
         self.filesystem_limits = limits;
@@ -339,6 +364,8 @@ impl SandboxBuilder<NoGuest> {
             input_dir: self.input_dir,
             output_dir: self.output_dir,
             temp_output: self.temp_output,
+            work_dir: self.work_dir,
+            temp_dir: self.temp_dir,
             filesystem_limits: self.filesystem_limits,
         }
     }
@@ -361,10 +388,147 @@ where
             None if self.temp_output => vfs.with_temp_output()?,
             None => vfs,
         };
+        if let Some((path, access)) = self.work_dir {
+            vfs = vfs.with_work_dir(path, access)?;
+        }
+        if self.temp_dir {
+            vfs = vfs.with_temp_dir()?;
+        }
         let fs = std::sync::Arc::new(std::sync::Mutex::new(vfs));
         let inner = self
             .guest
             .build(self.config, self.tools, network.clone(), fs.clone())?;
         Ok(Sandbox { inner, network, fs })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestGuest;
+
+    struct TestSandbox;
+
+    impl Guest for TestGuest {
+        type Sandbox = TestSandbox;
+
+        fn build(
+            self,
+            _config: SandboxConfig,
+            _tools: ToolRegistry,
+            _network: std::sync::Arc<std::sync::Mutex<NetworkPermissions>>,
+            _fs: std::sync::Arc<std::sync::Mutex<CapFs>>,
+        ) -> Result<Self::Sandbox> {
+            Ok(TestSandbox)
+        }
+    }
+
+    impl GuestSandbox for TestSandbox {
+        type SnapshotData = ();
+
+        fn run(&mut self, _code: &str) -> Result<ExecutionResult> {
+            Ok(ExecutionResult {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            })
+        }
+
+        fn snapshot(&mut self) -> Result<Snapshot<Self::SnapshotData>> {
+            Ok(Snapshot::new("test", std::sync::Arc::new(())))
+        }
+
+        fn restore(&mut self, _snapshot: &Snapshot<Self::SnapshotData>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn builder_registers_mounts_in_documented_order() {
+        let input = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let sandbox = SandboxBuilder::new()
+            .input_dir(input.path())
+            .output_dir(
+                output.path(),
+                DirPerms::READ | DirPerms::MUTATE,
+                FilePerms::READ | FilePerms::WRITE,
+            )
+            .work_dir(work.path(), WorkDirAccess::ReadOnly)
+            .temp_dir()
+            .guest(TestGuest)
+            .build()
+            .unwrap();
+        let fs = sandbox.fs.lock().unwrap();
+
+        assert_eq!(
+            fs.preopens(),
+            vec![(3, "/input"), (4, "/output"), (5, "/work"), (6, "/tmp")]
+        );
+        let work_flags = fs.get_flags(5).unwrap();
+        assert!(work_flags.read);
+        assert!(!work_flags.write);
+        assert!(!work_flags.mutate_directory);
+        let tmp_flags = fs.get_flags(6).unwrap();
+        assert!(tmp_flags.read);
+        assert!(tmp_flags.write);
+        assert!(tmp_flags.mutate_directory);
+    }
+
+    #[test]
+    fn builder_rejects_a_missing_work_directory() {
+        let parent = tempfile::tempdir().unwrap();
+        let missing = parent.path().join("missing");
+        let result = SandboxBuilder::new()
+            .work_dir(&missing, WorkDirAccess::ReadOnly)
+            .guest(TestGuest)
+            .build();
+
+        let error = result.err().expect("missing work directory must fail");
+        assert!(error.to_string().contains("failed to open work dir"));
+    }
+
+    #[test]
+    fn restore_clears_tmp_and_preserves_work() {
+        let work = tempfile::tempdir().unwrap();
+        let mut sandbox = SandboxBuilder::new()
+            .work_dir(work.path(), WorkDirAccess::ReadWrite)
+            .temp_dir()
+            .guest(TestGuest)
+            .build()
+            .unwrap();
+        {
+            let mut fs = sandbox.fs.lock().unwrap();
+            let preopens = fs.preopens();
+            let work_fd = preopens
+                .iter()
+                .find_map(|(fd, path)| (*path == "/work").then_some(*fd))
+                .unwrap();
+            let tmp_fd = preopens
+                .iter()
+                .find_map(|(fd, path)| (*path == "/tmp").then_some(*fd))
+                .unwrap();
+            drop(preopens);
+            let work_file = fs
+                .open_at(work_fd, "persist.txt", OpenFlags::CREATE)
+                .unwrap();
+            fs.write_file(work_file, 0, b"work").unwrap();
+            let tmp_file = fs
+                .open_at(tmp_fd, "discard.txt", OpenFlags::CREATE)
+                .unwrap();
+            fs.write_file(tmp_file, 0, b"tmp").unwrap();
+        }
+        let snapshot = sandbox.snapshot().unwrap();
+
+        sandbox.restore(&snapshot).unwrap();
+
+        let fs = sandbox.fs.lock().unwrap();
+        assert_eq!(
+            std::fs::read(work.path().join("persist.txt")).unwrap(),
+            b"work"
+        );
+        assert_eq!(std::fs::read_dir(fs.temp_path().unwrap()).unwrap().count(), 0);
     }
 }

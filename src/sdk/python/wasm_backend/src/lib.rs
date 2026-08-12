@@ -6,6 +6,7 @@ use hyperlight_sandbox::{
 };
 use hyperlight_sandbox_pyo3_common::{
     PyExecutionResult, build_tool_registry, parse_size, parse_tool_registration,
+    parse_work_dir_access, validate_host_directory,
 };
 use hyperlight_wasm_sandbox::Wasm;
 use pyo3::exceptions::PyRuntimeError;
@@ -30,20 +31,28 @@ pub struct WasmSandbox {
     input_dir: Option<String>,
     output_dir: Option<String>,
     temp_output: bool,
+    work_dir: Option<String>,
+    work_dir_access: hyperlight_sandbox::WorkDirAccess,
+    temp_dir: bool,
 }
 
 #[pymethods]
 impl WasmSandbox {
     #[new]
-    #[pyo3(signature = (module_path, input_dir=None, output_dir=None, temp_output=false, heap_size=None, stack_size=None))]
+    #[pyo3(signature = (module_path, input_dir=None, output_dir=None, temp_output=false, work_dir=None, work_dir_access="ro", temp_dir=false, heap_size=None, stack_size=None))]
     fn new(
         module_path: &str,
         input_dir: Option<&str>,
         output_dir: Option<&str>,
         temp_output: bool,
+        work_dir: Option<&str>,
+        work_dir_access: &str,
+        temp_dir: bool,
         heap_size: Option<&str>,
         stack_size: Option<&str>,
     ) -> PyResult<Self> {
+        let work_dir_access = parse_work_dir_access(work_dir_access)?;
+        validate_host_directory("work_dir", work_dir)?;
         Ok(WasmSandbox {
             inner: None,
             tools: HashMap::new(),
@@ -62,6 +71,9 @@ impl WasmSandbox {
             input_dir: input_dir.map(|s| s.to_string()),
             output_dir: output_dir.map(|s| s.to_string()),
             temp_output,
+            work_dir: work_dir.map(|s| s.to_string()),
+            work_dir_access,
+            temp_dir,
         })
     }
 
@@ -104,6 +116,12 @@ impl WasmSandbox {
                 );
             } else if self.temp_output {
                 builder = builder.temp_output();
+            }
+            if let Some(ref dir) = self.work_dir {
+                builder = builder.work_dir(dir, self.work_dir_access);
+            }
+            if self.temp_dir {
+                builder = builder.temp_dir();
             }
             let mut sandbox = builder
                 .build()
