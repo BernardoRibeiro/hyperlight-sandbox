@@ -696,11 +696,21 @@ impl CapFs {
     /// The preopen root is preserved. Nested directories, regular files, and
     /// symlinks are removed without following directory symlinks. Failures are
     /// returned so callers never execute a new run against dirty output state.
-    pub fn clear_output_files(&mut self) -> Result<(), FsError> {
-        let Some(output_fd) = self.output_fd else {
-            return Ok(());
-        };
-        self.clear_mount(output_fd)
+    pub fn clear_ephemeral_mounts(&mut self) -> Result<(), FsError> {
+        let mount_fds: Vec<u32> = self
+            .preopen_dirs
+            .iter()
+            .filter_map(|(&fd, entry)| {
+                (entry.lifetime == MountLifetime::ClearBeforeRun).then_some(fd)
+            })
+            .collect();
+        for fd in mount_fds {
+            self.clear_mount(fd).map_err(|error| {
+                log::error!("failed to clear ephemeral mount {fd}: {error:?}");
+                error
+            })?
+        }
+        Ok(())
     }
 
     /// Recursively clear an ephemeral mount while preserving its preopen root.
@@ -708,14 +718,18 @@ impl CapFs {
     /// At present only `/output` is ephemeral. `/input` and any other
     /// persistent preopen are rejected even if they grant mutation rights.
     pub fn clear_mount(&mut self, mount_fd: u32) -> Result<(), FsError> {
-        if self.output_fd != Some(mount_fd) {
-            return Err(FsError::NotPermitted);
-        }
-        let root = self
+        // if self.output_fd != Some(mount_fd) {
+        //     return Err(FsError::NotPermitted);
+        // }
+        //get the preopen dirs
+        let entry = self
             .preopen_dirs
             .get(&mount_fd)
-            .map(|entry| entry.dir.clone())
             .ok_or(FsError::BadDescriptor)?;
+        if entry.lifetime == MountLifetime::Persistent {
+            return Err(FsError::NotPermitted);
+        }
+        let root = entry.dir.clone();
 
         let mut cleanup_budget = CleanupBudget::default();
         let cleanup_result =
@@ -739,14 +753,14 @@ impl CapFs {
 
     /// Establish clean ephemeral state and reset per-run quota accounting.
     pub fn prepare_for_run(&mut self) -> Result<(), FsError> {
-        self.clear_output_files()?;
+        self.clear_ephemeral_mounts()?;
         self.run_budget = RunBudget::default();
         Ok(())
     }
 
     /// Clear output directory. Input is host-managed and left untouched.
     pub fn clear(&mut self) -> Result<(), FsError> {
-        self.clear_output_files()
+        self.clear_ephemeral_mounts()
     }
 
     // -----------------------------------------------------------------------
@@ -2018,7 +2032,7 @@ mod tests {
         fs.write_output_path("/output/gone.txt", b"output".to_vec())
             .unwrap();
 
-        fs.clear_output_files().unwrap();
+        fs.clear_ephemeral_mounts().unwrap();
 
         let input_fd = preopen_fd(&fs, "/input");
         let fd = fs
@@ -2050,7 +2064,7 @@ mod tests {
             .open_at(output_dir, "result.txt", OpenFlags::OPEN_EXISTING)
             .unwrap();
 
-        fs.clear_output_files().unwrap();
+        fs.clear_ephemeral_mounts().unwrap();
 
         assert_eq!(fs.get_type(input_dir), Ok(DescriptorType::Directory));
         assert_eq!(fs.read_file(input_file, 0, 100).unwrap().0, b"input");
@@ -2152,7 +2166,7 @@ mod tests {
         fs.open_at(output_fd, "gone.txt", OpenFlags::OPEN_EXISTING)
             .unwrap();
 
-        fs.clear_output_files().unwrap();
+        fs.clear_ephemeral_mounts().unwrap();
         let second_fd = fs
             .open_at(input_fd, "second.txt", OpenFlags::OPEN_EXISTING)
             .unwrap();
