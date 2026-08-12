@@ -131,6 +131,12 @@ pub struct DescriptorFlags {
     pub mutate_directory: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkDirAccess {
+    ReadOnly,
+    ReadWrite,
+}
+
 /// Resource limits enforced by [`CapFs`].
 ///
 /// Live descriptor and stream limits apply for the lifetime of the sandbox.
@@ -451,6 +457,9 @@ pub struct CapFs {
     output_path: Option<PathBuf>,
     // Owns the output temp dir when using the default.
     _output_tmp: Option<tempfile::TempDir>,
+
+    temp_paths: Option<PathBuf>,
+    temp_dirs: Option<Vec<tempfile::TempDir>>,
 }
 
 impl Default for CapFs {
@@ -476,6 +485,8 @@ impl CapFs {
             run_budget: RunBudget::default(),
             output_path: None,
             _output_tmp: None,
+            temp_paths: None,
+            temp_dirs: None,
         }
     }
 
@@ -555,6 +566,49 @@ impl CapFs {
             .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         self.output_fd = Some(fd);
         self.output_path = Some(output_path.as_ref().to_path_buf());
+        Ok(self)
+    }
+
+    pub fn with_work(mut self, work_path: impl AsRef<Path>, access: WorkDirAccess) -> Result<Self> {
+        let work_cap = CapDir::open_ambient_dir(work_path.as_ref(), ambient_authority())
+            .context("failed to open work dir")?;
+
+        let (dir_perms, file_perms) = match access {
+            WorkDirAccess::ReadOnly => (DirPerms::READ, FilePerms::READ),
+            WorkDirAccess::ReadWrite => (
+                DirPerms::READ | DirPerms::MUTATE,
+                FilePerms::READ | FilePerms::WRITE,
+            ),
+        };
+
+        self.register_preopen(
+            Dir::new(work_cap, dir_perms, file_perms),
+            "/work",
+            MountLifetime::Persistent,
+        )
+        .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+
+        Ok(self)
+    }
+
+    pub fn with_temp_dir(mut self) -> Result<Self> {
+        let temp_dir = tempfile::tempdir().context("failed to create temp dir")?;
+
+        let temp_cap = CapDir::open_ambient_dir(temp_dir.path(), ambient_authority())
+            .context("failed to open temp dir")?;
+
+        self.register_preopen(
+            Dir::new(
+                temp_cap,
+                DirPerms::READ | DirPerms::MUTATE,
+                FilePerms::READ | FilePerms::WRITE,
+            ),
+            "/temp",
+            MountLifetime::ClearBeforeRun,
+        )
+        .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+        self.temp_paths = Some(temp_dir.path().to_path_buf());
+        self.temp_dirs = Some(vec![temp_dir]);
         Ok(self)
     }
 
@@ -3588,5 +3642,75 @@ mod tests {
             fs.alloc_handle(),
             Err(FsError::Io("file descriptor handle space exhausted".into()))
         );
+    }
+
+    #[test]
+    fn work_mount_can_be_read_only() {
+        let work = tempfile::tempdir().unwrap();
+        std::fs::write(work.path().join("existing.txt"), b"hello").unwrap();
+
+        let fs = CapFs::new()
+            .with_work(work.path(), WorkDirAccess::ReadOnly)
+            .unwrap();
+
+        let work_fd = fs
+            .preopen_dirs
+            .iter()
+            .find_map(|(&fd, entry)| (entry.guest_path == "/work").then_some(fd))
+            .unwrap();
+
+        assert_eq!(
+            fs.preopen_dirs[&work_fd].lifetime,
+            MountLifetime::Persistent
+        );
+    }
+
+    #[test]
+    fn persistent_work_mount_is_not_cleared() {
+        let work = tempfile::tempdir().unwrap();
+
+        let mut fs = CapFs::new()
+            .with_work(work.path(), WorkDirAccess::ReadWrite)
+            .unwrap();
+
+        std::fs::write(work.path().join("persistent.txt"), b"survives").unwrap();
+
+        fs.prepare_for_run().unwrap();
+
+        assert_eq!(
+            std::fs::read(work.path().join("persistent.txt")).unwrap(),
+            b"survives"
+        );
+    }
+
+    #[test]
+    fn temp_mount_is_cleared_but_work_mount_persists() {
+        let work = tempfile::tempdir().unwrap();
+
+        let mut fs = CapFs::new()
+            .with_work(work.path(), WorkDirAccess::ReadWrite)
+            .unwrap()
+            .with_temp_dir()
+            .unwrap();
+
+        let temp_path = fs.temp_paths.clone().unwrap();
+        // Use the appropriate preopen descriptors from your implementation.
+        // Create:
+        //   /work/persistent.txt
+        //   /tmp/temporary.txt
+        std::fs::write(work.path().join("persistent.txt"), b"survives").unwrap();
+        std::fs::write(temp_path.join("temporary.txt"), b"survives").unwrap();
+
+        fs.prepare_for_run().unwrap();
+
+        // Verify:
+        //   /work/persistent.txt still exists
+        //   /tmp/temporary.txt no longer exists
+
+        assert_eq!(
+            std::fs::read(work.path().join("persistent.txt")).unwrap(),
+            b"survives"
+        );
+        assert!(!temp_path.join("temporary.txt").exists());
     }
 }

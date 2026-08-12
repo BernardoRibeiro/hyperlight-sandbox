@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 pub use cap_fs::{
     CapFs, DescriptorFlags, DescriptorStat, DescriptorType, Dir, DirPerms, FilePerms,
-    FilesystemLimits, FsError, OpenFlags,
+    FilesystemLimits, FsError, OpenFlags, WorkDirAccess,
 };
 pub use network::{HttpMethod, MethodFilter, NetworkPermission, NetworkPermissions};
 use serde::{Deserialize, Serialize};
@@ -240,6 +240,8 @@ pub struct SandboxBuilder<G = NoGuest> {
     tools: ToolRegistry,
     input_dir: Option<PathBuf>,
     output_dir: Option<(PathBuf, DirPerms, FilePerms)>,
+    work_dir: Option<(PathBuf, WorkDirAccess)>,
+    tmp_dir: bool,
     temp_output: bool,
     filesystem_limits: FilesystemLimits,
 }
@@ -258,7 +260,9 @@ impl Default for SandboxBuilder<NoGuest> {
             tools: ToolRegistry::default(),
             input_dir: None,
             output_dir: None,
+            work_dir: None,
             temp_output: false,
+            tmp_dir: false,
             filesystem_limits: FilesystemLimits::default(),
         }
     }
@@ -313,6 +317,16 @@ impl<G> SandboxBuilder<G> {
         self
     }
 
+    pub fn work_dir(mut self, path: impl Into<PathBuf>, access: WorkDirAccess) -> Self {
+        self.work_dir = Some((path.into(), access));
+        self
+    }
+
+    pub fn tmp_dir(mut self) -> Self {
+        self.tmp_dir = true;
+        self
+    }
+
     /// Enable a temporary writable `/output` directory. Ignored when an
     /// explicit `output_dir` is set.
     pub fn temp_output(mut self) -> Self {
@@ -338,8 +352,10 @@ impl SandboxBuilder<NoGuest> {
             tools: self.tools,
             input_dir: self.input_dir,
             output_dir: self.output_dir,
+            work_dir: self.work_dir,
             temp_output: self.temp_output,
             filesystem_limits: self.filesystem_limits,
+            tmp_dir: self.tmp_dir,
         }
     }
 }
@@ -361,6 +377,12 @@ where
             None if self.temp_output => vfs.with_temp_output()?,
             None => vfs,
         };
+        if let Some((path, access)) = &self.work_dir {
+            vfs = vfs.with_work(path, *access)?;
+        }
+        if self.tmp_dir {
+            vfs = vfs.with_temp_dir()?;
+        }
         let fs = std::sync::Arc::new(std::sync::Mutex::new(vfs));
         let inner = self
             .guest
