@@ -98,6 +98,12 @@ impl FsError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MountLifetime {
+    Persistent,
+    ClearBeforeRun,
+}
+
 // ---------------------------------------------------------------------------
 // Metadata types
 // ---------------------------------------------------------------------------
@@ -421,6 +427,7 @@ struct CleanupBudget {
 struct PreopenEntry {
     dir: Dir,
     guest_path: String,
+    lifetime: MountLifetime,
 }
 
 /// Capability-based virtual filesystem.
@@ -497,6 +504,7 @@ impl CapFs {
         self.register_preopen(
             Dir::new(input_cap, DirPerms::READ, FilePerms::READ),
             "/input",
+            MountLifetime::Persistent,
         )
         .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         Ok(self)
@@ -515,6 +523,7 @@ impl CapFs {
                     FilePerms::READ | FilePerms::WRITE,
                 ),
                 "/output",
+                MountLifetime::ClearBeforeRun,
             )
             .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         self.output_fd = Some(fd);
@@ -538,7 +547,11 @@ impl CapFs {
                 )
             })?;
         let fd = self
-            .register_preopen(Dir::new(output_cap, dir_perms, file_perms), "/output")
+            .register_preopen(
+                Dir::new(output_cap, dir_perms, file_perms),
+                "/output",
+                MountLifetime::ClearBeforeRun,
+            )
             .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         self.output_fd = Some(fd);
         self.output_path = Some(output_path.as_ref().to_path_buf());
@@ -1558,7 +1571,12 @@ impl CapFs {
             .retain(|_, stream| !descriptors.contains(&stream.dir_fd));
     }
 
-    fn register_preopen(&mut self, dir: Dir, guest_path: &str) -> Result<u32, FsError> {
+    fn register_preopen(
+        &mut self,
+        dir: Dir,
+        guest_path: &str,
+        lifetime: MountLifetime,
+    ) -> Result<u32, FsError> {
         self.ensure_descriptor_capacity()?;
         let fd = self.alloc_handle()?;
         self.preopen_dirs.insert(
@@ -1566,6 +1584,7 @@ impl CapFs {
             PreopenEntry {
                 dir: dir.clone(),
                 guest_path: guest_path.to_string(),
+                lifetime,
             },
         );
         self.descriptors.insert(
@@ -3238,6 +3257,7 @@ mod tests {
                     FilePerms::READ | FilePerms::WRITE,
                 ),
                 "/other",
+                MountLifetime::Persistent,
             )
             .unwrap();
         let output_fd = preopen_fd(&fs, "/output");
