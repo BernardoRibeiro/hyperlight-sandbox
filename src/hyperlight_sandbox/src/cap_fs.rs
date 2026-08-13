@@ -24,7 +24,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use cap_std::ambient_authority;
 use cap_std::fs::Dir as CapDir;
-
+use std::fmt;
 /// First preopen fd (after 0–2 stdio).
 const FIRST_PREOPEN_FD: u32 = 3;
 
@@ -425,6 +425,18 @@ struct CleanupBudget {
 }
 
 // ---------------------------------------------------------------------------
+// Helper functions
+// ---------------------------------------------------------------------------
+
+
+/// Check if two paths overlap.
+fn mount_paths_overlap(first: &Path, second: &Path) -> bool {
+    first == second
+        || first.starts_with(second)
+        || second.starts_with(first)
+}
+
+// ---------------------------------------------------------------------------
 // CapFs
 // ---------------------------------------------------------------------------
 
@@ -434,6 +446,7 @@ struct PreopenEntry {
     dir: Dir,
     guest_path: String,
     lifetime: MountLifetime,
+    host_path: PathBuf,
 }
 
 /// Capability-based virtual filesystem.
@@ -503,6 +516,30 @@ impl CapFs {
         &self.limits
     }
 
+    fn ensure_mount_does_not_overlap(
+        &self,
+        host_path: &Path,
+        lifetime: MountLifetime,
+    ) -> Result<(), FsError> {
+        for existing in self.preopen_dirs.values() {
+            let existing_is_ephemeral =
+                existing.lifetime == MountLifetime::ClearBeforeRun;
+            let new_is_ephemeral =
+                lifetime == MountLifetime::ClearBeforeRun;
+    
+            let persistent_ephemeral_pair =
+                existing_is_ephemeral != new_is_ephemeral;
+    
+            if persistent_ephemeral_pair
+                && mount_paths_overlap(host_path, &existing.host_path)
+            {
+                return Err(FsError::NotPermitted);
+            }
+        }
+    
+        Ok(())
+    }
+
     /// Add a read-only input directory preopen (`/input`).
     pub fn with_input(mut self, input_path: impl AsRef<Path>) -> Result<Self> {
         let input_cap = CapDir::open_ambient_dir(input_path.as_ref(), ambient_authority())
@@ -512,10 +549,14 @@ impl CapFs {
                     input_path.as_ref().display()
                 )
             })?;
+            
+        self.ensure_mount_does_not_overlap(input_path.as_ref(), MountLifetime::Persistent)
+            .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         self.register_preopen(
             Dir::new(input_cap, DirPerms::READ, FilePerms::READ),
             "/input",
             MountLifetime::Persistent,
+            input_path.as_ref()
         )
         .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         Ok(self)
@@ -526,6 +567,9 @@ impl CapFs {
         let output_tmp = tempfile::tempdir().context("failed to create output temp dir")?;
         let output_cap = CapDir::open_ambient_dir(output_tmp.path(), ambient_authority())
             .context("failed to open output temp dir")?;
+
+        self.ensure_mount_does_not_overlap(output_tmp.path(), MountLifetime::ClearBeforeRun)
+            .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         let fd = self
             .register_preopen(
                 Dir::new(
@@ -535,6 +579,7 @@ impl CapFs {
                 ),
                 "/output",
                 MountLifetime::ClearBeforeRun,
+                output_tmp.path().to_path_buf(),
             )
             .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         self.output_fd = Some(fd);
@@ -557,11 +602,15 @@ impl CapFs {
                     output_path.as_ref().display()
                 )
             })?;
+
+        self.ensure_mount_does_not_overlap(output_path.as_ref(), MountLifetime::ClearBeforeRun)
+            .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         let fd = self
             .register_preopen(
                 Dir::new(output_cap, dir_perms, file_perms),
                 "/output",
                 MountLifetime::ClearBeforeRun,
+                output_path.as_ref().to_path_buf(),
             )
             .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         self.output_fd = Some(fd);
@@ -581,10 +630,13 @@ impl CapFs {
             ),
         };
 
+        self.ensure_mount_does_not_overlap(work_path.as_ref(), MountLifetime::Persistent)
+            .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         self.register_preopen(
             Dir::new(work_cap, dir_perms, file_perms),
             "/work",
             MountLifetime::Persistent,
+            work_path.as_ref().to_path_buf(),
         )
         .map_err(|err| anyhow::anyhow!("{err:?}"))?;
 
@@ -597,6 +649,8 @@ impl CapFs {
         let temp_cap = CapDir::open_ambient_dir(temp_dir.path(), ambient_authority())
             .context("failed to open temp dir")?;
 
+        self.ensure_mount_does_not_overlap(temp_dir.path(), MountLifetime::ClearBeforeRun)
+            .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         self.register_preopen(
             Dir::new(
                 temp_cap,
@@ -605,6 +659,7 @@ impl CapFs {
             ),
             "/tmp",
             MountLifetime::ClearBeforeRun,
+            temp_dir.path().to_path_buf(),
         )
         .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         self.temp_paths = Some(temp_dir.path().to_path_buf());
@@ -1644,7 +1699,15 @@ impl CapFs {
         dir: Dir,
         guest_path: &str,
         lifetime: MountLifetime,
+        host_path: impl AsRef<Path>,
     ) -> Result<u32, FsError> {
+        // canonicalize() resolves the provided path to an absolute path,
+        // resolving symlinks and removing redundant components like "." and "..".
+        let host_path = host_path
+            .as_ref()
+            .canonicalize()
+            .map_err(FsError::from_io)?;
+    
         self.ensure_descriptor_capacity()?;
         let fd = self.alloc_handle()?;
         self.preopen_dirs.insert(
@@ -1653,6 +1716,7 @@ impl CapFs {
                 dir: dir.clone(),
                 guest_path: guest_path.to_string(),
                 lifetime,
+                host_path,
             },
         );
         self.descriptors.insert(
@@ -1723,6 +1787,21 @@ impl CapFs {
 // No Clone — snapshots don't need filesystem state. Input is immutable
 // (shared via Arc) and output is ephemeral (wiped each run).
 //TODO: include filesystem state in snapshots
+
+impl fmt::Debug for CapFs {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CapFs")
+            .field("preopen_count", &self.preopen_dirs.len())
+            .field("descriptor_count", &self.descriptors.len())
+            .field("stream_count", &self.streams.len())
+            .field("directory_stream_count", &self.dir_streams.len())
+            .field("next_handle", &self.next_handle)
+            .field("output_configured", &self.output_fd.is_some())
+            .field("temp_configured", &self.temp_paths.is_some())
+            .finish()
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -3326,6 +3405,7 @@ mod tests {
                 ),
                 "/other",
                 MountLifetime::Persistent,
+                other.path().to_path_buf(),
             )
             .unwrap();
         let output_fd = preopen_fd(&fs, "/output");
@@ -3753,6 +3833,40 @@ mod tests {
         assert!(!work.path().join("output.txt").exists());
         // temp file does not exist
         assert!(!fs.temp_paths.as_ref().unwrap().join("temporary.txt").exists());
+    }
+
+    #[test]
+    fn persistent_and_ephemeral_mounts_cannot_use_the_same_host_path() {
+        let root = tempfile::tempdir().unwrap();
+
+        let result = CapFs::new()
+            .with_work(root.path(), WorkDirAccess::ReadWrite)
+            .unwrap()
+            .with_output_dir(
+                root.path(),
+                DirPerms::READ | DirPerms::MUTATE,
+                FilePerms::READ | FilePerms::WRITE,
+            );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn nested_persistent_and_ephemeral_mounts_are_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("output");
+        std::fs::create_dir(&output).unwrap();
+
+        let result = CapFs::new()
+            .with_work(root.path(), WorkDirAccess::ReadWrite)
+            .unwrap()
+            .with_output_dir(
+                &output,
+                DirPerms::READ | DirPerms::MUTATE,
+                FilePerms::READ | FilePerms::WRITE,
+            );
+
+        assert!(result.is_err());
     }
             
 }
