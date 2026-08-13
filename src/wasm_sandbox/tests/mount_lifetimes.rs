@@ -38,10 +38,17 @@ fn work_persists_while_tmp_is_cleared_across_runs_and_restore() {
     let first = sandbox
         .run(
             r#"
+import os
 with open('/work/src/module.py') as source:
     original = source.read()
 with open('/work/src/generated.txt', 'w') as generated:
-    generated.write(original + 'generated\n')
+    generated.write(original)
+with open('/work/src/generated.txt', 'a') as generated:
+    generated.write('generated\n')
+os.rename('/work/src/generated.txt', '/work/src/renamed.txt')
+with open('/work/src/delete-me.txt', 'w') as temporary:
+    temporary.write('delete me')
+os.remove('/work/src/delete-me.txt')
 with open('/tmp/transient.txt', 'w') as transient:
     transient.write('discard me')
 print(original.strip())
@@ -51,8 +58,10 @@ print(original.strip())
 
     assert_eq!(first.exit_code, 0, "stderr: {}", first.stderr);
     assert_eq!(first.stdout.trim(), "VALUE = 41");
+    assert!(!source_dir.join("generated.txt").exists());
+    assert!(!source_dir.join("delete-me.txt").exists());
     assert_eq!(
-        std::fs::read_to_string(source_dir.join("generated.txt")).unwrap(),
+        std::fs::read_to_string(source_dir.join("renamed.txt")).unwrap(),
         "VALUE = 41\ngenerated\n"
     );
 
@@ -60,7 +69,7 @@ print(original.strip())
         .run(
             r#"
 import os
-print(f"work={os.path.exists('/work/src/generated.txt')}")
+print(f"work={os.path.exists('/work/src/renamed.txt')}")
 print(f"tmp={os.path.exists('/tmp/transient.txt')}")
 with open('/tmp/before-restore.txt', 'w') as temporary:
     temporary.write('discard on restore')
@@ -79,7 +88,7 @@ with open('/tmp/before-restore.txt', 'w') as temporary:
         .run(
             r#"
 import os
-print(f"work={os.path.exists('/work/src/generated.txt')}")
+print(f"work={os.path.exists('/work/src/renamed.txt')}")
 print(f"tmp={os.path.exists('/tmp/before-restore.txt')}")
 "#,
         )
@@ -102,8 +111,7 @@ print(f"tmp={os.path.exists('/tmp/before-restore.txt')}")
     );
 }
 
-#[test]
-fn hard_interrupt_poisons_old_sandbox_and_fresh_sandbox_runs() {
+fn interrupt_one_sandbox() -> (Duration, Duration) {
     let (entered_tx, entered_rx) = mpsc::sync_channel(1);
     let mut sandbox = SandboxBuilder::new()
         .guest(Wasm)
@@ -147,15 +155,6 @@ while True:
         error.to_string().contains("guest execution failed"),
         "unexpected cancellation error: {error:#}"
     );
-    assert!(
-        cancellation_elapsed < Duration::from_secs(5),
-        "hard cancellation took {cancellation_elapsed:?}"
-    );
-    assert!(
-        total_elapsed < Duration::from_secs(10),
-        "interrupted invocation took {total_elapsed:?}"
-    );
-
     let poisoned = sandbox
         .run("print('must not run')")
         .expect_err("interrupted sandbox should remain poisoned");
@@ -165,14 +164,31 @@ while True:
     );
     drop(sandbox);
 
-    let mut fresh = SandboxBuilder::new()
-        .guest(Wasm)
-        .module_path(python_guest_path())
-        .build()
-        .expect("failed to recreate sandbox");
-    let recovered = fresh
-        .run("print('fresh sandbox')")
-        .expect("fresh sandbox should run after discarding poisoned instance");
-    assert_eq!(recovered.exit_code, 0, "stderr: {}", recovered.stderr);
-    assert_eq!(recovered.stdout.trim(), "fresh sandbox");
+    (cancellation_elapsed, total_elapsed)
+}
+
+#[test]
+fn repeated_hard_interrupts_poison_old_sandboxes_and_fresh_sandboxes_run() {
+    for attempt in 1..=3 {
+        let (cancellation_elapsed, total_elapsed) = interrupt_one_sandbox();
+        assert!(
+            cancellation_elapsed < Duration::from_secs(5),
+            "attempt {attempt}: hard cancellation took {cancellation_elapsed:?}"
+        );
+        assert!(
+            total_elapsed < Duration::from_secs(10),
+            "attempt {attempt}: interrupted invocation took {total_elapsed:?}"
+        );
+
+        let mut fresh = SandboxBuilder::new()
+            .guest(Wasm)
+            .module_path(python_guest_path())
+            .build()
+            .expect("failed to recreate sandbox");
+        let recovered = fresh
+            .run("print('fresh sandbox')")
+            .expect("fresh sandbox should run after discarding poisoned instance");
+        assert_eq!(recovered.exit_code, 0, "stderr: {}", recovered.stderr);
+        assert_eq!(recovered.stdout.trim(), "fresh sandbox");
+    }
 }

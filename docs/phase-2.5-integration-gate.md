@@ -6,8 +6,9 @@ implemented.
 
 ## What the gate proves
 
-The `mount_lifetimes` integration test uses the existing AOT Python component
-to exercise the complete path:
+The `mount_lifetimes` integration test reuses the existing small AOT Python
+component to exercise the complete path without overlapping the Phase 3
+toolbox implementation:
 
 ```text
 guest component -> WASI filesystem imports -> HostState -> CapFs -> host mount
@@ -15,13 +16,14 @@ guest component -> WASI filesystem imports -> HostState -> CapFs -> host mount
 
 It verifies that:
 
-- nested files under a read-write `/work` mount can be read and modified;
+- nested files under a read-write `/work` mount can be read, created,
+  modified, renamed, and deleted;
 - `/work` changes persist across `run()` and runtime snapshot restore;
 - `/tmp` is recursively cleared before the next run and on restore;
 - a running guest can be interrupted through Hyperlight's interrupt handle;
 - interruption poisons the old sandbox;
-- discarding the poisoned instance and constructing a fresh sandbox restores
-  service.
+- three consecutive interrupt, discard, recreate, and recovery cycles
+  complete successfully.
 
 ## Cancellation policy for the toolbox
 
