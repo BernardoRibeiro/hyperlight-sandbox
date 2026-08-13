@@ -8,6 +8,11 @@ use hyperlight_sandbox::{
 use hyperlight_sandbox_pyo3_common::{
     PyExecutionResult, build_tool_registry, parse_size, parse_tool_registration,
 };
+use hyperlight_sandbox::WorkDirAccess;
+use hyperlight_sandbox_pyo3_common::{
+    parse_work_dir_access,
+    validate_host_directory,
+};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
@@ -30,12 +35,15 @@ pub struct JSSandbox {
     input_dir: Option<String>,
     output_dir: Option<String>,
     temp_output: bool,
+    work_dir: Option<String>,
+    work_dir_access: WorkDirAccess,
+    temp_dir: bool,
 }
 
 #[pymethods]
 impl JSSandbox {
     #[new]
-    #[pyo3(signature = (input_dir=None, output_dir=None, temp_output=false, module_path="", heap_size=None, stack_size=None))]
+    #[pyo3(signature = (input_dir=None, output_dir=None, temp_output=false, module_path="", heap_size=None, stack_size=None, work_dir=None, work_dir_access="ro", temp_dir=false))]
     fn new(
         input_dir: Option<&str>,
         output_dir: Option<&str>,
@@ -43,6 +51,9 @@ impl JSSandbox {
         module_path: &str,
         heap_size: Option<&str>,
         stack_size: Option<&str>,
+        work_dir: Option<&str>,
+        work_dir_access: &str,
+        temp_dir: bool,
     ) -> PyResult<Self> {
         if !module_path.is_empty() {
             return Err(PyRuntimeError::new_err(
@@ -50,6 +61,8 @@ impl JSSandbox {
                  use the Wasm backend if you need a custom module",
             ));
         }
+        let work_dir_access = parse_work_dir_access(work_dir_access)?;
+        validate_host_directory("work_dir", work_dir)?;
         Ok(JSSandbox {
             inner: None,
             tools: HashMap::new(),
@@ -68,6 +81,9 @@ impl JSSandbox {
             input_dir: input_dir.map(|s| s.to_string()),
             output_dir: output_dir.map(|s| s.to_string()),
             temp_output,
+            work_dir: work_dir.map(str::to_owned),
+            work_dir_access,
+            temp_dir,
         })
     }
 
@@ -110,6 +126,12 @@ impl JSSandbox {
                 );
             } else if self.temp_output {
                 builder = builder.temp_output();
+            }
+            if let Some(ref dir) = self.work_dir {
+                builder = builder.work_dir(dir, self.work_dir_access);
+            }
+            if self.temp_dir {
+                builder = builder.tmp_dir();
             }
             let mut sandbox = builder
                 .build()

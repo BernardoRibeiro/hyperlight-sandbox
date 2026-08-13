@@ -1,8 +1,11 @@
 import unittest
 from unittest.mock import patch
 
-from hyperlight_sandbox import Sandbox
-
+from hyperlight_sandbox import (
+    CodeExecutionTool,
+    Sandbox,
+    SandboxEnvironment,
+)
 
 class _FakeNativeSandbox:
     def __init__(self, **kwargs):
@@ -71,4 +74,34 @@ class TestMountConfiguration(unittest.TestCase):
     def test_private_temp_dir_is_forwarded(self):
         sandbox = _sandbox(temp_dir=True)
 
+        self.assertTrue(sandbox._inner.kwargs["temp_dir"])
+
+    def test_environment_forwards_work_and_temp_configuration(self):
+        environment = SandboxEnvironment(
+            work_dir="/host/work",
+            work_dir_access="rw",
+            temp_dir=True,
+        )
+        tool = CodeExecutionTool(environment=environment)
+
+        with (
+            patch(
+                "hyperlight_sandbox._load_backend",
+                return_value=("wasm", _FakeNativeSandbox),
+            ),
+            patch(
+                "hyperlight_sandbox.resolve_module_path",
+                return_value="/fake/python-sandbox.aot",
+            ),
+        ):
+            sandbox = tool._get_sandbox()
+
+        self.assertEqual(
+            sandbox._inner.kwargs["work_dir"],
+            "/host/work",
+        )
+        self.assertEqual(
+            sandbox._inner.kwargs["work_dir_access"],
+            "rw",
+        )
         self.assertTrue(sandbox._inner.kwargs["temp_dir"])

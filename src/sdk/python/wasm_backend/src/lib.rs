@@ -11,6 +11,12 @@ use hyperlight_wasm_sandbox::Wasm;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
+use hyperlight_sandbox::WorkDirAccess;
+use hyperlight_sandbox_pyo3_common::{
+    parse_work_dir_access,
+    validate_host_directory,
+};
+
 type WasmSandboxInner = Sandbox<Wasm>;
 type WasmSnapshotInner = hyperlight_sandbox::Snapshot<<
     <Wasm as hyperlight_sandbox::Guest>::Sandbox as hyperlight_sandbox::GuestSandbox
@@ -30,12 +36,15 @@ pub struct WasmSandbox {
     input_dir: Option<String>,
     output_dir: Option<String>,
     temp_output: bool,
+    work_dir: Option<String>,
+    work_dir_access: WorkDirAccess,
+    temp_dir: bool,
 }
 
 #[pymethods]
 impl WasmSandbox {
     #[new]
-    #[pyo3(signature = (module_path, input_dir=None, output_dir=None, temp_output=false, heap_size=None, stack_size=None))]
+    #[pyo3(signature = (module_path, input_dir=None, output_dir=None, temp_output=false, heap_size=None, stack_size=None, work_dir=None, work_dir_access="ro", temp_dir=false))]
     fn new(
         module_path: &str,
         input_dir: Option<&str>,
@@ -43,7 +52,12 @@ impl WasmSandbox {
         temp_output: bool,
         heap_size: Option<&str>,
         stack_size: Option<&str>,
+        work_dir: Option<&str>,
+        work_dir_access: &str,
+        temp_dir: bool,
     ) -> PyResult<Self> {
+        let work_dir_access = parse_work_dir_access(work_dir_access)?;
+        validate_host_directory("work_dir", work_dir)?;
         Ok(WasmSandbox {
             inner: None,
             tools: HashMap::new(),
@@ -62,6 +76,9 @@ impl WasmSandbox {
             input_dir: input_dir.map(|s| s.to_string()),
             output_dir: output_dir.map(|s| s.to_string()),
             temp_output,
+            work_dir: work_dir.map(str::to_owned),
+            work_dir_access,
+            temp_dir,
         })
     }
 
@@ -105,6 +122,13 @@ impl WasmSandbox {
             } else if self.temp_output {
                 builder = builder.temp_output();
             }
+            if let Some(ref dir) = self.work_dir {
+                builder = builder.work_dir(dir, self.work_dir_access);
+            }
+            if self.temp_dir {
+                builder = builder.tmp_dir();
+            }
+            
             let mut sandbox = builder
                 .build()
                 .map_err(|e| PyRuntimeError::new_err(format!("Failed to create sandbox: {e:#}")))?;
