@@ -36,6 +36,14 @@ def _normalize_backend(backend: str) -> str:
         return "hyperlight-js"
     raise ValueError(f"Unknown backend '{backend}'. Expected 'wasm' or 'hyperlight-js'.")
 
+def _normalize_work_dir_access(access: str) -> str:
+    normalized = access.strip().lower().replace("_", "-")
+    if normalized in {"ro", "read-only", "readonly"}:
+        return "ro"
+    if normalized in {"rw", "read-write", "readwrite"}:
+        return "rw"
+    raise ValueError(f"Invalid work_dir_access '{access}'. Expected 'ro' or 'rw'.")
+
 
 def _load_backend(backend: str):
     normalized = _normalize_backend(backend)
@@ -93,6 +101,9 @@ class SandboxEnvironment:
     module_path: str | None = None
     heap_size: str = field(default_factory=lambda: _DEFAULT_HEAP_SIZE)
     stack_size: str = field(default_factory=lambda: _DEFAULT_STACK_SIZE)
+    work_dir: str | None = None
+    work_dir_access: str = "ro"
+    temp_dir: bool = False
 
 
 class Sandbox:
@@ -109,12 +120,22 @@ class Sandbox:
         module_path: str | None = None,
         heap_size: str | None = None,
         stack_size: str | None = None,
+        work_dir: str | None = None,
+        work_dir_access: str = "ro",
+        temp_dir: bool = False,
     ) -> None:
         if heap_size is None:
             heap_size = _DEFAULT_HEAP_SIZE
         if stack_size is None:
             stack_size = _DEFAULT_STACK_SIZE
+
+        normalized_work_dir_access = _normalize_work_dir_access(
+            work_dir_access
+        )
+
+        # Validate configuration before loading the backend.
         normalized_backend, native_cls = _load_backend(backend)
+
         effective_module = module
         if module_path is not None and module == DEFAULT_MODULE_REF:
             effective_module = None
@@ -123,6 +144,7 @@ class Sandbox:
             "heap_size": heap_size,
             "stack_size": stack_size,
         }
+
         if input_dir is not None:
             kwargs["input_dir"] = input_dir
         if output_dir is not None:
@@ -130,8 +152,18 @@ class Sandbox:
         if temp_output:
             kwargs["temp_output"] = True
 
+        if work_dir is not None:
+            kwargs["work_dir"] = work_dir
+            kwargs["work_dir_access"] = normalized_work_dir_access
+
+        if temp_dir:
+            kwargs["temp_dir"] = True
+
         if normalized_backend == "wasm":
-            resolved_module_path = resolve_module_path(module=effective_module, module_path=module_path)
+            resolved_module_path = resolve_module_path(
+                module=effective_module,
+                module_path=module_path,
+            )
             self._inner = native_cls(
                 module_path=resolved_module_path,
                 **kwargs,
@@ -193,6 +225,7 @@ class Sandbox:
         self._inner.restore(snapshot)
 
 
+
 @dataclass
 class CodeExecutionTool:
     """High-level tool for agent framework integration."""
@@ -211,6 +244,12 @@ class CodeExecutionTool:
                 kwargs["output_dir"] = self.environment.output_dir
             if self.environment.temp_output:
                 kwargs["temp_output"] = True
+            if self.environment.work_dir is not None:
+                kwargs["work_dir"] = self.environment.work_dir
+            if self.environment.work_dir_access is not None:
+                kwargs["work_dir_access"] = self.environment.work_dir_access
+            if self.environment.temp_dir:
+                kwargs["temp_dir"] = True
             self._sandbox = Sandbox(
                 **kwargs,
                 backend=self.environment.backend,
