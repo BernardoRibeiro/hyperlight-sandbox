@@ -11,6 +11,7 @@ pub mod test_utils;
 pub mod tools;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 pub use cap_fs::{
@@ -117,6 +118,19 @@ pub trait Guest: Sized {
     ) -> Result<Self::Sandbox>;
 }
 
+/// A backend-provided handle that can interrupt an active guest invocation.
+///
+/// Interrupting an invocation may leave the sandbox poisoned. Callers must
+/// discard it or recover it using backend-specific snapshot semantics before
+/// attempting another invocation.
+pub trait ExecutionInterruptHandle: Send + Sync {
+    /// Interrupt the guest if it is currently running.
+    ///
+    /// Returns `true` when an active invocation was interrupted and `false`
+    /// when the sandbox was not running.
+    fn kill(&self) -> bool;
+}
+
 pub trait GuestSandbox: Send {
     type SnapshotData: Send + Sync + 'static;
     /// Execute guest code.
@@ -128,6 +142,13 @@ pub trait GuestSandbox: Send {
     fn snapshot(&mut self) -> Result<Snapshot<Self::SnapshotData>>;
     /// Restore a previously captured guest runtime state.
     fn restore(&mut self, snapshot: &Snapshot<Self::SnapshotData>) -> Result<()>;
+
+    /// Return a handle capable of interrupting an active guest invocation.
+    ///
+    /// Backends without hard interruption support return `Ok(None)`.
+    fn interrupt_handle(&self) -> Result<Option<Arc<dyn ExecutionInterruptHandle>>> {
+        Ok(None)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -179,6 +200,15 @@ impl<G: Guest> Sandbox<G> {
 
     pub fn snapshot(&mut self) -> Result<Snapshot<<G::Sandbox as GuestSandbox>::SnapshotData>> {
         self.inner.snapshot()
+    }
+
+    /// Return a backend-provided hard-interruption handle, when supported.
+    ///
+    /// The handle may be moved to a watchdog thread while the current thread
+    /// blocks in [`run`](Self::run). A successful interruption may poison the
+    /// sandbox, so the safest recovery policy is to discard and recreate it.
+    pub fn interrupt_handle(&self) -> Result<Option<Arc<dyn ExecutionInterruptHandle>>> {
+        self.inner.interrupt_handle()
     }
 
     pub fn restore(

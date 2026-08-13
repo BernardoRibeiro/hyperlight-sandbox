@@ -6,9 +6,10 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use hyperlight_host::hypervisor::InterruptHandle as HyperlightInterruptHandle;
 use hyperlight_sandbox::{
-    CapFs, ExecutionResult, Guest, GuestSandbox, NetworkPermissions, SandboxConfig, Snapshot,
-    ToolRegistry,
+    CapFs, ExecutionInterruptHandle, ExecutionResult, Guest, GuestSandbox, NetworkPermissions,
+    SandboxConfig, Snapshot, ToolRegistry,
 };
 use hyperlight_wasm::{
     LoadedWasmSandbox, SandboxBuilder as HyperlightSandboxBuilder, Snapshot as WasmSnapshot,
@@ -217,6 +218,14 @@ pub struct WasmComponentSandbox {
     fs: Arc<Mutex<CapFs>>,
 }
 
+struct WasmExecutionInterruptHandle(Arc<dyn HyperlightInterruptHandle>);
+
+impl ExecutionInterruptHandle for WasmExecutionInterruptHandle {
+    fn kill(&self) -> bool {
+        self.0.kill()
+    }
+}
+
 impl WasmComponentSandbox {
     fn with_tools(
         config: SandboxConfig,
@@ -334,5 +343,14 @@ impl GuestSandbox for WasmComponentSandbox {
             .sb
             .restore(snapshot.snapshot().clone())
             .map_err(|e| anyhow::anyhow!("restore failed: {e}"))
+    }
+
+    fn interrupt_handle(&self) -> Result<Option<Arc<dyn ExecutionInterruptHandle>>> {
+        let handle = self
+            .sandbox
+            .sb
+            .interrupt_handle()
+            .map_err(|error| anyhow::anyhow!("failed to obtain interrupt handle: {error}"))?;
+        Ok(Some(Arc::new(WasmExecutionInterruptHandle(handle))))
     }
 }
