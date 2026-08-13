@@ -579,7 +579,7 @@ impl CapFs {
                 ),
                 "/output",
                 MountLifetime::ClearBeforeRun,
-                output_tmp.path().to_path_buf(),
+                output_tmp.path(),
             )
             .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         self.output_fd = Some(fd);
@@ -610,7 +610,7 @@ impl CapFs {
                 Dir::new(output_cap, dir_perms, file_perms),
                 "/output",
                 MountLifetime::ClearBeforeRun,
-                output_path.as_ref().to_path_buf(),
+                output_path.as_ref(),
             )
             .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         self.output_fd = Some(fd);
@@ -636,7 +636,7 @@ impl CapFs {
             Dir::new(work_cap, dir_perms, file_perms),
             "/work",
             MountLifetime::Persistent,
-            work_path.as_ref().to_path_buf(),
+            work_path.as_ref(),
         )
         .map_err(|err| anyhow::anyhow!("{err:?}"))?;
 
@@ -659,7 +659,7 @@ impl CapFs {
             ),
             "/tmp",
             MountLifetime::ClearBeforeRun,
-            temp_dir.path().to_path_buf(),
+            temp_dir.path(),
         )
         .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         self.temp_paths = Some(temp_dir.path().to_path_buf());
@@ -3405,7 +3405,7 @@ mod tests {
                 ),
                 "/other",
                 MountLifetime::Persistent,
-                other.path().to_path_buf(),
+                other.path(),
             )
             .unwrap();
         let output_fd = preopen_fd(&fs, "/output");
