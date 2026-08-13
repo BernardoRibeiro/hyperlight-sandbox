@@ -428,12 +428,9 @@ struct CleanupBudget {
 // Helper functions
 // ---------------------------------------------------------------------------
 
-
 /// Check if two paths overlap.
 fn mount_paths_overlap(first: &Path, second: &Path) -> bool {
-    first == second
-        || first.starts_with(second)
-        || second.starts_with(first)
+    first == second || first.starts_with(second) || second.starts_with(first)
 }
 
 // ---------------------------------------------------------------------------
@@ -522,21 +519,16 @@ impl CapFs {
         lifetime: MountLifetime,
     ) -> Result<(), FsError> {
         for existing in self.preopen_dirs.values() {
-            let existing_is_ephemeral =
-                existing.lifetime == MountLifetime::ClearBeforeRun;
-            let new_is_ephemeral =
-                lifetime == MountLifetime::ClearBeforeRun;
-    
-            let persistent_ephemeral_pair =
-                existing_is_ephemeral != new_is_ephemeral;
-    
-            if persistent_ephemeral_pair
-                && mount_paths_overlap(host_path, &existing.host_path)
-            {
+            let existing_is_ephemeral = existing.lifetime == MountLifetime::ClearBeforeRun;
+            let new_is_ephemeral = lifetime == MountLifetime::ClearBeforeRun;
+
+            let persistent_ephemeral_pair = existing_is_ephemeral != new_is_ephemeral;
+
+            if persistent_ephemeral_pair && mount_paths_overlap(host_path, &existing.host_path) {
                 return Err(FsError::NotPermitted);
             }
         }
-    
+
         Ok(())
     }
 
@@ -549,14 +541,14 @@ impl CapFs {
                     input_path.as_ref().display()
                 )
             })?;
-            
+
         self.ensure_mount_does_not_overlap(input_path.as_ref(), MountLifetime::Persistent)
             .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         self.register_preopen(
             Dir::new(input_cap, DirPerms::READ, FilePerms::READ),
             "/input",
             MountLifetime::Persistent,
-            input_path.as_ref()
+            input_path.as_ref(),
         )
         .map_err(|err| anyhow::anyhow!("{err:?}"))?;
         Ok(self)
@@ -1707,7 +1699,7 @@ impl CapFs {
             .as_ref()
             .canonicalize()
             .map_err(FsError::from_io)?;
-    
+
         self.ensure_descriptor_capacity()?;
         let fd = self.alloc_handle()?;
         self.preopen_dirs.insert(
@@ -3780,10 +3772,14 @@ mod tests {
         let work_fd = preopen_fd(&fs, "/work");
         let temp_fd = preopen_fd(&fs, "/tmp");
 
-        let work_file = fs.open_at(work_fd, "persistent.txt", OpenFlags::CREATE).unwrap();
+        let work_file = fs
+            .open_at(work_fd, "persistent.txt", OpenFlags::CREATE)
+            .unwrap();
         fs.write_file(work_file, 0, b"survives").unwrap();
 
-        let temp_file = fs.open_at(temp_fd, "temporary.txt", OpenFlags::CREATE).unwrap();
+        let temp_file = fs
+            .open_at(temp_fd, "temporary.txt", OpenFlags::CREATE)
+            .unwrap();
         fs.write_file(temp_file, 0, b"survives").unwrap();
 
         fs.prepare_for_run().unwrap();
@@ -3793,17 +3789,9 @@ mod tests {
         let temp_path = fs.temp_paths.as_ref().unwrap();
         assert!(!temp_path.join("temporary.txt").exists());
 
-        assert_eq!(
-            fs.get_type(work_file),
-            Ok(DescriptorType::RegularFile)
-        );
-        assert_eq!(
-            fs.get_type(temp_file),
-            Err(FsError::BadDescriptor)
-        );
-
+        assert_eq!(fs.get_type(work_file), Ok(DescriptorType::RegularFile));
+        assert_eq!(fs.get_type(temp_file), Err(FsError::BadDescriptor));
     }
-
 
     // Then add a test proving that both ephemeral mounts are cleaned:
     #[test]
@@ -3811,9 +3799,10 @@ mod tests {
         let work = tempfile::tempdir().unwrap();
 
         let mut fs = CapFs::new()
-            .with_output_dir(work.path(),
-            DirPerms::READ | DirPerms::MUTATE,
-            FilePerms::READ | FilePerms::WRITE,
+            .with_output_dir(
+                work.path(),
+                DirPerms::READ | DirPerms::MUTATE,
+                FilePerms::READ | FilePerms::WRITE,
             )
             .unwrap()
             .with_temp_dir()
@@ -3821,10 +3810,14 @@ mod tests {
         let output_fd = preopen_fd(&fs, "/output");
         let temp_fd = preopen_fd(&fs, "/tmp");
 
-        let output_file = fs.open_at(output_fd, "output.txt", OpenFlags::CREATE).unwrap();
+        let output_file = fs
+            .open_at(output_fd, "output.txt", OpenFlags::CREATE)
+            .unwrap();
         fs.write_file(output_file, 0, b"survives").unwrap();
 
-        let temp_file = fs.open_at(temp_fd, "temporary.txt", OpenFlags::CREATE).unwrap();
+        let temp_file = fs
+            .open_at(temp_fd, "temporary.txt", OpenFlags::CREATE)
+            .unwrap();
         fs.write_file(temp_file, 0, b"survives").unwrap();
 
         fs.clear_ephemeral_mounts().unwrap();
@@ -3832,7 +3825,13 @@ mod tests {
         // output file does not exist
         assert!(!work.path().join("output.txt").exists());
         // temp file does not exist
-        assert!(!fs.temp_paths.as_ref().unwrap().join("temporary.txt").exists());
+        assert!(
+            !fs.temp_paths
+                .as_ref()
+                .unwrap()
+                .join("temporary.txt")
+                .exists()
+        );
     }
 
     #[test]
@@ -3868,5 +3867,4 @@ mod tests {
 
         assert!(result.is_err());
     }
-            
 }

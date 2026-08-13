@@ -16,18 +16,13 @@ pub fn parse_work_dir_access(access: &str) -> PyResult<WorkDirAccess> {
     }
 }
 
-pub fn validate_host_directory(
-    label: &str,
-    path: Option<&str>,
-) -> PyResult<()> {
+pub fn validate_host_directory(label: &str, path: Option<&str>) -> PyResult<()> {
     let Some(path) = path else {
         return Ok(());
     };
 
     let metadata = std::fs::metadata(path).map_err(|error| {
-        PyValueError::new_err(format!(
-            "{label} '{path}' is not accessible: {error}"
-        ))
+        PyValueError::new_err(format!("{label} '{path}' is not accessible: {error}"))
     })?;
 
     if !metadata.is_dir() {

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use hyperlight_javascript_sandbox::HyperlightJs;
+use hyperlight_sandbox::WorkDirAccess;
 use hyperlight_sandbox::{
     DEFAULT_HEAP_SIZE, DEFAULT_STACK_SIZE, DirPerms, FilePerms, HttpMethod, Sandbox,
     SandboxBuilder, SandboxConfig,
@@ -8,11 +9,7 @@ use hyperlight_sandbox::{
 use hyperlight_sandbox_pyo3_common::{
     PyExecutionResult, build_tool_registry, parse_size, parse_tool_registration,
 };
-use hyperlight_sandbox::WorkDirAccess;
-use hyperlight_sandbox_pyo3_common::{
-    parse_work_dir_access,
-    validate_host_directory,
-};
+use hyperlight_sandbox_pyo3_common::{parse_work_dir_access, validate_host_directory};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 

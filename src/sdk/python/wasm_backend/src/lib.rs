@@ -12,10 +12,7 @@ use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 
 use hyperlight_sandbox::WorkDirAccess;
-use hyperlight_sandbox_pyo3_common::{
-    parse_work_dir_access,
-    validate_host_directory,
-};
+use hyperlight_sandbox_pyo3_common::{parse_work_dir_access, validate_host_directory};
 
 type WasmSandboxInner = Sandbox<Wasm>;
 type WasmSnapshotInner = hyperlight_sandbox::Snapshot<<
@@ -128,7 +125,7 @@ impl WasmSandbox {
             if self.temp_dir {
                 builder = builder.tmp_dir();
             }
-            
+
             let mut sandbox = builder
                 .build()
                 .map_err(|e| PyRuntimeError::new_err(format!("Failed to create sandbox: {e:#}")))?;
