@@ -45,10 +45,10 @@ impl Toolbox {
             if run {
                 let (status, out, err) = self.command(fs, &words);
                 previous = status;
+                self.last_status = status;
                 append(&mut stdout, &out); append(&mut stderr, &err);
             }
         }
-        self.last_status = previous;
         result(previous, &stdout, &stderr)
     }
 
@@ -60,7 +60,7 @@ impl Toolbox {
             "echo" => ok(&(words[1..].join(" ") + "\n")),
             "printf" => ok(&words[1..].join("")),
             "pwd" => ok(&(self.cwd.clone() + "\n")),
-            "cd" => { let path = words.get(1).map(String::as_str).unwrap_or("/work"); match self.path(path) { Ok(path) if fs.dir_by_guest_path(&path).is_some() => { self.cwd = path; ok("") }, Ok(_) => fail("cd: not a mounted directory"), Err(e) => fail(&e) } }
+            "cd" => { let path = words.get(1).map(String::as_str).unwrap_or("/work"); match self.path(path) { Ok(path) if self.is_directory(fs, &path) => { self.cwd = path; ok("") }, Ok(_) => fail("cd: not a directory"), Err(e) => fail(&e) } }
             "cat" => {
                 let mut out = String::new();
                 for path in &words[1..] { match self.path(path).and_then(|p| fs.read_guest_file(&p).map_err(|e| e.to_string())) { Ok(data) => append(&mut out, &String::from_utf8_lossy(&data)), Err(e) => return fail(&format!("cat: {e}")) } }
@@ -85,6 +85,15 @@ impl Toolbox {
     fn split_path(&self, path: &str) -> Result<(String, String), String> {
         let path = self.path(path)?; let (root, rest) = path.trim_start_matches('/').split_once('/').ok_or("path must name a file")?;
         Ok((format!("/{root}"), rest.into()))
+    }
+    /// True if `path` (already normalized via [`Self::path`]) names either a
+    /// preopened mount root or a directory somewhere beneath one.
+    fn is_directory(&self, fs: &CapFs, path: &str) -> bool {
+        if fs.dir_by_guest_path(path).is_some() { return true; }
+        match self.split_path(path) {
+            Ok((root, rest)) => fs.preopens().into_iter().find(|(_, p)| *p == root).and_then(|(fd, _)| fs.stat_at(fd, &rest).ok()).is_some_and(|stat| stat.descriptor_type == crate::DescriptorType::Directory),
+            Err(_) => false,
+        }
     }
     fn open(&self, fs: &mut CapFs, path: &str, flags: OpenFlags) -> Result<u32, String> {
         let (root, rest) = self.split_path(path)?; let fd = fs.preopens().into_iter().find(|(_, p)| *p == root).map(|(fd, _)| fd).ok_or("unmounted path")?;
@@ -114,4 +123,6 @@ fn parse(input: &str) -> Result<Vec<(Join, Vec<String>)>, &'static str> {
 #[cfg(test)] mod tests { use super::*; use crate::WorkDirAccess;
     #[test] fn runs_composition_quotes_and_status() { let mut shell = Toolbox::default(); let mut fs = CapFs::new(); let result = shell.execute_cli(&mut fs, "false && echo no || echo 'yes yes'; echo $?"); assert_eq!(result.stdout, "yes yes\n0\n"); }
     #[test] fn mutations_use_capfs_permissions() { let dir = tempfile::tempdir().unwrap(); let mut fs = CapFs::new().with_work(dir.path(), WorkDirAccess::ReadWrite).unwrap(); let mut shell = Toolbox::default(); assert_eq!(shell.execute_cli(&mut fs, "mkdir nested; touch nested/a; cat nested/a").exit_code, 0); assert!(dir.path().join("nested/a").exists()); }
+    #[test] fn cd_into_created_subdirectory() { let dir = tempfile::tempdir().unwrap(); let mut fs = CapFs::new().with_work(dir.path(), WorkDirAccess::ReadWrite).unwrap(); let mut shell = Toolbox::default(); let result = shell.execute_cli(&mut fs, "mkdir project && cd project && pwd"); assert_eq!(result.exit_code, 0); assert_eq!(result.stdout, "/work/project\n"); assert_eq!(shell.execute_cli(&mut fs, "cd missing").exit_code, 1); }
+    #[test] fn exit_status_tracks_within_composed_script() { let dir = tempfile::tempdir().unwrap(); let mut shell = Toolbox::default(); let mut fs = CapFs::new().with_work(dir.path(), WorkDirAccess::ReadWrite).unwrap(); let result = shell.execute_cli(&mut fs, "cat missing.txt; echo $?"); assert_eq!(result.stdout, "1\n"); }
 }

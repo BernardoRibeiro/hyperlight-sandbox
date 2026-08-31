@@ -43,29 +43,26 @@ fn main() {
 
     separator("Test 2: directories and cd");
     run(&mut shell, &mut fs, "mkdir project");
-    // Known limitation: `cd` only recognizes preopened mount roots (via
-    // CapFs::dir_by_guest_path), not directories created afterwards with
-    // `mkdir`. So this currently fails even though `project` now exists.
+    // `cd` resolves both preopened mount roots and directories created since,
+    // via a stat_at lookup relative to the owning mount.
     run(&mut shell, &mut fs, "cd project && pwd");
     run(&mut shell, &mut fs, "cd missing");
 
-    separator("Test 3: files with touch, cat, and quoting (paths relative to /work)");
-    run(&mut shell, &mut fs, "touch project/notes.txt");
-    run(&mut shell, &mut fs, "cat project/notes.txt && echo 'notes.txt exists and is empty'");
+    separator("Test 3: files with touch, cat, and quoting (paths relative to cwd: /work/project)");
+    run(&mut shell, &mut fs, "touch notes.txt");
+    run(&mut shell, &mut fs, "cat notes.txt && echo 'notes.txt exists and is empty'");
 
     separator("Test 4: exit-status propagation via $?");
-    // Known limitation: Toolbox only writes `last_status` once, after the
-    // whole script finishes, so `$?` inside a single composed script still
-    // sees the status left over from the *previous* execute_cli call rather
-    // than an earlier command in this one.
-    run(&mut shell, &mut fs, "cat project/missing.txt; echo \"same-script status: $?\"");
-    // Across two separate execute_cli calls it does carry forward correctly.
-    run(&mut shell, &mut fs, "cat project/missing.txt");
+    // last_status is now updated after every command, not just at the end of
+    // the script, so $? reflects the command that just ran even mid-script.
+    run(&mut shell, &mut fs, "cat missing.txt; echo \"same-script status: $?\"");
+    // It still carries forward correctly across separate execute_cli calls.
+    run(&mut shell, &mut fs, "cat missing.txt");
     run(&mut shell, &mut fs, "echo \"cross-call status: $?\"");
 
     separator("Test 5: cleanup with rm");
-    run(&mut shell, &mut fs, "rm project/notes.txt");
-    run(&mut shell, &mut fs, "cat project/notes.txt");
+    run(&mut shell, &mut fs, "rm notes.txt");
+    run(&mut shell, &mut fs, "cat notes.txt");
 
     println!("\nAll toolbox commands executed without shelling out to a host process.");
 }
