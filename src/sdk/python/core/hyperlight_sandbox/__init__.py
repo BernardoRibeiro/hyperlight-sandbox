@@ -72,6 +72,8 @@ __all__ = [
     "ExecutionResult",
     "Sandbox",
     "SandboxEnvironment",
+    "ToolResult",
+    "Toolbox",
     "__version__",
 ]
 
@@ -87,6 +89,17 @@ class ExecutionResult:
     @property
     def success(self) -> bool:
         return self.exit_code == 0
+
+
+@dataclass(frozen=True)
+class ToolResult:
+    """Result returned by the Wasm-native toolbox command interface."""
+
+    stdout: str
+    stderr: str
+    exit_code: int
+    timed_out: bool = False
+    truncated: bool = False
 
 
 @dataclass
@@ -225,6 +238,40 @@ class Sandbox:
         self._inner.restore(snapshot)
 
 
+class Toolbox:
+    """Agent-facing wrapper around the AOT Wasm-native toolbox component.
+
+    Hard deadlines are enforced by the caller's Phase 2.5 process supervisor;
+    a timed-out toolbox sandbox must be discarded rather than reused.
+    """
+
+    def __init__(
+        self,
+        *,
+        module_path: str,
+        work_dir: str,
+        work_dir_access: str = "ro",
+        temp_dir: bool = True,
+    ) -> None:
+        self._sandbox = Sandbox(
+            backend="wasm",
+            module=None,
+            module_path=module_path,
+            work_dir=work_dir,
+            work_dir_access=work_dir_access,
+            temp_dir=temp_dir,
+        )
+
+    async def execute_cli(self, script: str) -> ToolResult:
+        """Execute a bounded Bash-compatible script inside the Wasm guest."""
+        result = self._sandbox.run(script)
+        marker = "[toolbox output truncated]"
+        return ToolResult(
+            stdout=result.stdout,
+            stderr=result.stderr,
+            exit_code=result.exit_code,
+            truncated=marker in result.stderr,
+        )
 
 @dataclass
 class CodeExecutionTool:
