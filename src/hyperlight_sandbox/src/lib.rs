@@ -9,6 +9,7 @@ pub mod runtime;
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
 pub mod tools;
+pub mod toolbox;
 
 use std::path::{Path, PathBuf};
 
