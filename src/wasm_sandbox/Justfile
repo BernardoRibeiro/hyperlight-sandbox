@@ -111,7 +111,19 @@ js-guest-build: js-guest-build-wasm js-guest-build-aot
 js-guest-install:
     cd {{repo-root}}/src/wasm_sandbox/guests/javascript && npm install
 
-build target=default-target: _clean-stale-wasm (guest-build target) (js-guest-build)
+toolbox-guest-install:
+    cd {{repo-root}}/src/wasm_sandbox/guests/toolbox && npm install
+
+toolbox-guest-build-wasm: toolbox-guest-install
+    cd {{repo-root}}/src/wasm_sandbox/guests/toolbox && npm run build
+
+toolbox-guest-build-aot: toolbox-guest-build-wasm ensure-tools
+    hyperlight-wasm-aot compile --component \
+        {{repo-root}}/src/wasm_sandbox/guests/toolbox/toolbox.wasm {{repo-root}}/src/wasm_sandbox/guests/toolbox/toolbox.aot
+
+toolbox-guest-build: toolbox-guest-build-wasm toolbox-guest-build-aot
+
+build target=default-target: _clean-stale-wasm (guest-build target) (js-guest-build) (toolbox-guest-build)
     cargo build --manifest-path {{repo-root}}/src/wasm_sandbox/Cargo.toml --profile={{ if target == "debug" {"dev"} else { target } }}
 
 #### EXAMPLES ####
@@ -134,6 +146,9 @@ test target=default-target:
 phase-2-5-test target=default-target: (guest-build target)
     cargo test --manifest-path {{repo-root}}/src/wasm_sandbox/Cargo.toml --profile={{ if target == "debug" {"dev"} else { target } }} --test toolbox_phase_2_5 -- --ignored --test-threads=1 --nocapture
 
+phase-3-test: toolbox-guest-build
+    cargo test --manifest-path {{repo-root}}/src/wasm_sandbox/Cargo.toml --test toolbox_phase_3 -- --ignored --test-threads=1 --nocapture
+
 lint:
     cargo clippy -p hyperlight-wasm-sandbox --all-targets -- -D warnings
 
@@ -144,6 +159,8 @@ guest-clean:
     -{{rmrf}} {{repo-root}}/src/wasm_sandbox/guests/python/python-sandbox.aot
     -{{rmrf}} {{repo-root}}/src/wasm_sandbox/guests/javascript/js-sandbox.wasm
     -{{rmrf}} {{repo-root}}/src/wasm_sandbox/guests/javascript/js-sandbox.aot
+    -{{rmrf}} {{repo-root}}/src/wasm_sandbox/guests/toolbox/toolbox.wasm
+    -{{rmrf}} {{repo-root}}/src/wasm_sandbox/guests/toolbox/toolbox.aot
 
 clean: guest-clean
     -{{rmrf}} {{repo-root}}/target/hyperlight-wasm-runtime

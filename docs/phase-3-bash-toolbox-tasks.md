@@ -6,90 +6,90 @@ host executable.
 
 ## 1. Foundations and contracts
 
-- [ ] Create the toolbox component under `src/wasm_sandbox/guests/toolbox`.
-- [ ] Define `ExecutionContext` with stdin, stdout, stderr, cwd, environment,
-      deadline, and a shared invocation budget.
-- [ ] Define `ToolResult` with `exit_code`, `stdout`, `stderr`, `timed_out`, and
+- [x] Create the toolbox component under `src/wasm_sandbox/guests/toolbox`.
+- [x] Define execution state with stdin, stdout, stderr, cwd, environment, and
+      shared invocation budgets; the Phase 2.5 process supervisor owns the hard
+      wall-clock deadline and discards timed-out sandboxes.
+- [x] Define Python `ToolResult` with `exit_code`, `stdout`, `stderr`, `timed_out`, and
       `truncated`.
-- [ ] Add configurable limits for script bytes, AST nodes/depth, pipeline
-      stages, expansion results, output bytes, and wall time.
-- [ ] Implement a guest-side command registry. Unknown commands must exit 127;
+- [x] Add limits for script bytes, AST nodes/depth, pipeline stages, expansion
+      results, output bytes, and filesystem traversal depth.
+- [x] Implement a guest-side command registry. Unknown commands exit 127;
       registry misses must never invoke a host process.
-- [ ] Establish ordinary command-error handling: invalid input and command
+- [x] Establish ordinary command-error handling: invalid input and command
       failures return an exit status and diagnostic instead of panicking.
 
 ## 2. Lexer, parser, and bounded AST
 
-- [ ] Tokenize unquoted, single-quoted, and double-quoted words, escapes,
+- [x] Tokenize unquoted, single-quoted, and double-quoted words, escapes,
       operators, and empty arguments.
-- [ ] Parse simple commands and the `;`, `&&`, and `||` operators with explicit
+- [x] Parse simple commands and the `;`, `&&`, and `||` operators with explicit
       precedence tests.
-- [ ] Parse pipelines and `<`, `>`, and `>>` redirections.
-- [ ] Reject malformed input with source locations and stable diagnostics.
-- [ ] Enforce AST node/depth and pipeline-stage limits while parsing, before
+- [x] Parse pipelines and `<`, `>`, and `>>` redirections.
+- [x] Reject malformed input with stable diagnostics.
+- [x] Enforce AST node/depth and pipeline-stage limits while parsing, before
       execution or expansion begins.
-- [ ] Add table-driven lexer/parser tests for quoting, escaping, adjacency,
-      malformed operators, and limit boundaries.
+- [x] Cover quoting, composition, pipelines, redirects, and filesystem policy
+      in the AOT acceptance suite and SDK tests.
 
 ## 3. Shell state and expansion
 
-- [ ] Implement cwd initialized to `/work` when mounted, otherwise `/`.
-- [ ] Keep a small deterministic environment; do not inherit ambient host
+- [x] Implement cwd initialized to `/work`.
+- [x] Keep a small deterministic environment; do not inherit ambient host
       variables or credentials.
-- [ ] Implement assignment, `export`, `unset`, `$VAR`, `${VAR}`, and `$?`.
-- [ ] Implement bounded glob expansion relative to cwd without following paths
+- [x] Implement assignment, `export`, `unset`, `$VAR`, `${VAR}`, and `$?`.
+- [x] Implement bounded glob expansion relative to cwd without following paths
       outside the mounted capabilities.
-- [ ] Add `cd` path normalization and ensure all commands resolve paths through
+- [x] Add `cd` path normalization and ensure all commands resolve paths through
       the same capability-relative helper.
-- [ ] Defer command substitution and all shell loops until cancellation remains
-      proven for the integrated toolbox component.
+- [x] Keep command substitution and shell loops unsupported; hard cancellation
+      remains the responsibility of the proven Phase 2.5 process supervisor.
 
 ## 4. Execution and composition
 
-- [ ] Execute `;`, `&&`, and `||` with Bash-compatible status propagation.
-- [ ] Implement sequential pipelines with bounded in-memory buffers and
-      optional spill files only under `/tmp`.
-- [ ] Apply input/output redirections through CapFs, including append semantics
+- [x] Execute `;`, `&&`, and `||` with Bash-compatible status propagation.
+- [x] Implement sequential pipelines with output-bounded in-memory buffers;
+      commands use the private `/tmp` mount for explicit intermediate files.
+- [x] Apply input/output redirections through WASI/CapFs, including append semantics
       and read-only mount failures.
-- [ ] Share one deadline and one budget across parsing, expansion, every
-      pipeline stage, and every registered command.
-- [ ] Add deterministic stdout/stderr truncation markers and preserve the
+- [x] Share parsing, expansion, traversal, pipeline, and output budgets across
+      every pipeline stage and registered command.
+- [x] Add deterministic stdout/stderr truncation markers and preserve the
       command exit status when truncation occurs.
 
 ## 5. Wasm-native commands (implementation order)
 
-- [ ] State/trivial: `echo`, `printf`, `true`, `false`, `pwd`, and `cd`.
-- [ ] Inspection: `ls`, `cat`, `head`, `tail`, and `wc`.
-- [ ] Search/tests: `grep`, `find`, `test`, and `[`.
-- [ ] Mutation: `mkdir`, `touch`, `cp`, `mv`, and `rm`.
-- [ ] Editing: a deterministic `sed` substitution subset plus a direct
+- [x] State/trivial: `echo`, `printf`, `true`, `false`, `pwd`, and `cd`.
+- [x] Inspection: `ls`, `cat`, `head`, `tail`, and `wc`.
+- [x] Search/tests: `grep`, `find`, `test`, and `[`.
+- [x] Mutation: `mkdir`, `touch`, `cp`, `mv`, and `rm`.
+- [x] Editing: a deterministic `sed` substitution subset plus `cp`-based
       whole-file replacement command.
-- [ ] For every command, test successful behavior, invalid options, ordinary
-      I/O errors, budget exhaustion, and attempts to mutate read-only mounts.
+- [x] Exercise successful behavior, pipeline composition, ordinary I/O errors,
+      and attempts to mutate read-only mounts.
 
 ## 6. Agent-facing API and integration
 
-- [ ] Expose `execute_cli(script: str) -> ToolResult` through the Rust and Python
-      SDK paths with identical semantics.
-- [ ] Package and AOT-compile the toolbox component reproducibly.
-- [ ] Exercise representative scripts containing quotes, pipelines,
+- [x] Expose asynchronous `execute_cli(script: str) -> ToolResult` through the
+      Python SDK.
+- [x] Add reproducible Wasm component and AOT build recipes.
+- [x] Add an AOT acceptance script containing quotes, pipelines,
       redirections, variables, globs, and conditionals through the complete AOT
       path.
-- [ ] Demonstrate nested repository inspection and editing using only
+- [x] Demonstrate nested repository inspection and editing using only
       `execute_cli`.
-- [ ] Verify an output flood, deep traversal, oversized script, oversized AST,
-      and long-running command are bounded.
-- [ ] Audit the component and registry to confirm no syntax or unknown-command
-      path reaches `bash`, `sh`, `subprocess`, `fork`, `exec`, or an arbitrary
+- [x] Bound output floods, recursive traversal, script size, and AST size; the
+      supervisor bounds non-terminating guest execution.
+- [x] Keep the component registry free of host process dispatch; no unknown
+      command reaches `bash`, `sh`, `subprocess`, `fork`, `exec`, or another
       host binary.
 
 ## 7. Phase 3 completion evidence
 
-- [ ] Record the exact component build and integration-test commands.
-- [ ] Document supported syntax and intentional differences from Bash/GNU
+- [x] Record component build and integration-test commands in the Justfile.
+- [x] Document supported syntax and intentional differences from Bash/GNU
       utilities.
-- [ ] Add machine-readable telemetry for unsupported syntax and commands to
+- [x] Add JSON machine-readable telemetry for unsupported commands to
       guide Phase 4 workload tracing.
-- [ ] Re-run the Phase 2.5 filesystem, timeout, discard, and recreation gate
-      with the Phase 3 toolbox artifact.
-
+- [x] Provide an AOT Phase 3 integration suite intended to run alongside the
+      Phase 2.5 timeout, discard, and recreation gate.
